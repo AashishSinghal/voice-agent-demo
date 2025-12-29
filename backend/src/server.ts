@@ -1,4 +1,6 @@
 import express from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import multer from 'multer';
@@ -16,22 +18,22 @@ dotenv.config();
 const ollamaService = new OllamaService();
 
 const app = express();
+const httpServer = createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
+app.use(cors({
+  origin: process.env.CLIENT_URL || 'http://localhost:5173',
+  credentials: true,
+}));
 app.use(express.json());
 
-// Configure multer for file uploads
 const upload = multer({
   dest: 'uploads/',
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
 });
 
-// Serve audio files
 app.use('/audio', express.static('uploads'));
 
-// Health check endpoint
 app.get('/health', (_, res) => {
   res.json({
     status: 'ok',
@@ -180,13 +182,117 @@ app.post('/api/test-query', async (req, res) => {
   }
 });
 
+// Initialize Socket.io
+const io = new Server(httpServer, {
+  cors: {
+    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+  maxHttpBufferSize: 10 * 1024 * 1024, // 10MB for audio files
+});
+
+// Socket.io event handlers
+io.on('connection', (socket) => {
+  console.log(`\n🔌 Client connected: ${socket.id}`);
+
+  // Handle incoming audio
+  socket.on('audio:input', async (data: { audio: ArrayBuffer }) => {
+    let convertedPath: string | null = null;
+    const tempInputPath = path.join('uploads', `input_${Date.now()}.webm`);
+
+    try {
+      console.log(`\n🎤 Received audio from client: ${socket.id}`);
+      console.log(`📊 Audio size: ${data.audio.byteLength} bytes`);
+
+      // Emit processing start
+      socket.emit('processing:start');
+
+      // Save ArrayBuffer to file
+      await fs.promises.writeFile(tempInputPath, Buffer.from(data.audio));
+
+      // 1. Convert audio to WAV format
+      convertedPath = await audioProcessor.convertToWav(tempInputPath);
+
+      // 2. Transcribe with Whisper
+      socket.emit('processing:stt');
+      const transcription = await whisperService.transcribeAudioToText(convertedPath);
+
+      if (!transcription.text || transcription.text.trim().length === 0) {
+        socket.emit('error', { message: 'No speech detected' });
+        return;
+      }
+
+      console.log(`📝 Transcription: "${transcription.text}"`);
+
+      // Emit transcription to client
+      socket.emit('transcription:complete', {
+        text: transcription.text,
+        confidence: transcription.confidence,
+      });
+
+      // 3. Generate response with LLM
+      socket.emit('processing:llm');
+      const response = await ollamaService.generateResponse(transcription.text, []);
+
+      console.log(`💬 Response: "${response.text}"`);
+      console.log(`🚪 Should Deflect: ${response.shouldDeflect}`);
+
+      // Emit response text to client
+      socket.emit('response:text', {
+        text: response.text,
+        shouldDeflect: response.shouldDeflect,
+      });
+
+      // 4. Synthesize speech with Piper
+      socket.emit('processing:tts');
+      console.log(`🔊 Generating TTS response...`);
+      const audioResponse = await piperService.synthesizeSpeechFromText(response.text);
+
+      console.log(`✅ Sending audio response to client\n`);
+
+      // Send audio response back to client
+      socket.emit('response:audio', {
+        audio: audioResponse,
+      });
+
+      // Cleanup
+      await audioProcessor.cleanupAudioFile(tempInputPath);
+      if (convertedPath) {
+        await audioProcessor.cleanupAudioFile(convertedPath);
+      }
+
+    } catch (error) {
+      console.error('❌ Error processing audio:', error);
+
+      // Cleanup on error
+      if (tempInputPath) {
+        await audioProcessor.cleanupAudioFile(tempInputPath);
+      }
+      if (convertedPath) {
+        await audioProcessor.cleanupAudioFile(convertedPath);
+      }
+
+      socket.emit('error', {
+        message: 'Failed to process audio',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`🔌 Client disconnected: ${socket.id}\n`);
+  });
+});
+
 // Start server
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   console.log(`\n🚀 Voice Agent Backend Server`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   console.log(`📍 Server running on: http://localhost:${PORT}`);
   console.log(`🏥 Health check: http://localhost:${PORT}/health`);
   console.log(`🎤 Audio endpoint: POST http://localhost:${PORT}/api/process-audio`);
   console.log(`💬 Text endpoint: POST http://localhost:${PORT}/api/test-query`);
+  console.log(`🔌 Socket.io: ws://localhost:${PORT}`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
 });
