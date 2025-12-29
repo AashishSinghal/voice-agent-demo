@@ -1,0 +1,83 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Build outputs
+dist/
+build/
+*.log
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Model files (large binary files)
+models/whisper/*.bin
+models/piper/*.onnx
+models/piper/*.json
+*.bin
+*.gguf
+*.onnx
+
+# Audio files (temporary)
+*.wav
+*.mp3
+*.webm
+*.ogg
+/tmp/*.wav
+/tmp/*.mp3
+
+# OS specific
+Thumbs.db
+.DS_Store
+
+# TypeScript
+*.tsbuildinfo
+
+# Frontend specific (React/Vite)
+.vite/
+.cache/
+
+# Backend specific
+*.pid
+*.seed
+*.pid.lock
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Misc
+.eslintcache
+.stylelintcache
