@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { ConversationMessage } from '../../hooks/useSocketConnection';
 import { User, Bot, AlertCircle } from 'lucide-react';
-import AudioPlayer from './AudioPlayer';
 
 interface ConversationDisplayProps {
   messages: ConversationMessage[];
@@ -10,7 +9,6 @@ interface ConversationDisplayProps {
 const ConversationDisplay = ({ messages }: ConversationDisplayProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   });
@@ -18,13 +16,13 @@ const ConversationDisplay = ({ messages }: ConversationDisplayProps) => {
   if (messages.length === 0) {
     return (
       <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">
-        No messages yet. Start recording to begin.
+        No messages yet. Start the call to begin.
       </div>
     );
   }
 
   return (
-    <div className="h-full overflow-y-auto p-4 space-y-4">
+    <div className="h-full overflow-y-auto p-4 space-y-3">
       {messages.map((message) => (
         <div
           key={message.id}
@@ -33,8 +31,8 @@ const ConversationDisplay = ({ messages }: ConversationDisplayProps) => {
           }`}
         >
           {message.type === 'assistant' && (
-            <div className="shrink-0 h-8 w-8 rounded-full bg-blue-500 flex items-center justify-center">
-              <Bot className="h-5 w-5 text-white" />
+            <div className="shrink-0 h-7 w-7 rounded-full bg-blue-500 flex items-center justify-center">
+              <Bot className="h-4 w-4 text-white" />
             </div>
           )}
 
@@ -55,19 +53,14 @@ const ConversationDisplay = ({ messages }: ConversationDisplayProps) => {
             )}
             <p className="text-sm whitespace-pre-wrap">{message.text}</p>
 
-            {/* Audio player for assistant messages */}
-            {message.type === 'assistant' && message.audioBuffer && (
-              <AudioPlayer audioBuffer={message.audioBuffer} autoPlay={true} />
-            )}
-
             <span className="text-xs opacity-70 mt-1 block">
               {message.timestamp.toLocaleTimeString()}
             </span>
           </div>
 
           {message.type === 'user' && (
-            <div className="shrink-0 h-8 w-8 rounded-full bg-blue-500 flex items-center justify-center">
-              <User className="h-5 w-5 text-white" />
+            <div className="shrink-0 h-7 w-7 rounded-full bg-blue-500 flex items-center justify-center">
+              <User className="h-4 w-4 text-white" />
             </div>
           )}
         </div>

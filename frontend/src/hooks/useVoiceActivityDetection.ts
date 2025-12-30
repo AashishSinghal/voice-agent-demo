@@ -18,8 +18,8 @@ export const useVoiceActivityDetection = (
 
   const {
     onSpeechEnd,
-    silenceThreshold = 30, // Default: quiet threshold
-    silenceDuration = 2000, // Default: 2 seconds of silence
+    silenceThreshold = 30, 
+    silenceDuration = 2000,
   } = options;
 
   const checkAudioLevel = useCallback(() => {
@@ -36,7 +36,8 @@ export const useVoiceActivityDetection = (
       // Start silence timer if not already started
       if (!silenceTimerRef.current) {
         silenceTimerRef.current = setTimeout(() => {
-          console.log('Speech ended - silence detected');
+          const ts = new Date().toISOString();
+          console.log(`[VAD ${ts}] Speech ended (${silenceDuration}ms silence)`);
           onSpeechEnd();
         }, silenceDuration);
       }
@@ -94,7 +95,10 @@ export const useVoiceActivityDetection = (
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      audioContext.close();
+      // Only close if not already closed
+      if (audioContext.state !== 'closed') {
+        audioContext.close();
+      }
     };
   }, [audioStream, enabled, checkAudioLevel]);
 };

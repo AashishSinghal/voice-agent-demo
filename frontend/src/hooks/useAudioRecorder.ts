@@ -19,8 +19,10 @@ export const useAudioRecorder = (
   const streamRef = useRef<MediaStream | null>(null);
 
   const startRecording = useCallback(async () => {
+    const ts = new Date().toISOString();
+    console.log(`[AUDIO_RECORDER ${ts}] Starting recording`);
+
     try {
-      // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -31,7 +33,6 @@ export const useAudioRecorder = (
 
       streamRef.current = stream;
 
-      // Create MediaRecorder with appropriate MIME type
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/webm';
@@ -51,6 +52,8 @@ export const useAudioRecorder = (
 
       mediaRecorder.onstop = () => {
         const audioBlob = new Blob(chunksRef.current, { type: mimeType });
+        const stopTs = new Date().toISOString();
+        console.log(`[AUDIO_RECORDER ${stopTs}] Stopped. Size: ${audioBlob.size} bytes`);
         onAudioData(audioBlob);
         chunksRef.current = [];
       };
@@ -59,15 +62,18 @@ export const useAudioRecorder = (
       setIsRecording(true);
       setError(null);
     } catch (err) {
+      const errTs = new Date().toISOString();
       setError('Failed to access microphone');
-      console.error('Error accessing microphone:', err);
+      console.error(`[AUDIO_RECORDER ${errTs}] Error:`, err);
     }
   }, [onAudioData]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
-      streamRef.current?.getTracks().forEach(track => {track.stop()});
+      streamRef.current?.getTracks().forEach(track => {
+        track.stop();
+      });
       setIsRecording(false);
       streamRef.current = null;
     }

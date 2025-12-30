@@ -1,7 +1,8 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useAudioRecorder } from "../../hooks/useAudioRecorder";
 import { useSocketConnection } from "../../hooks/useSocketConnection";
 import { useVoiceActivityDetection } from "../../hooks/useVoiceActivityDetection";
+import { useBotStateStore } from "../../stores/useBotStateStore";
 import { Button } from "../ui/button";
 import {
 	Card,
@@ -10,52 +11,128 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
-import { Switch } from "../ui/switch";
-import { Mic, MicOff, Loader2 } from "lucide-react";
+import { Phone, PhoneOff, Loader2 } from "lucide-react";
 import ConversationDisplay from "./ConversationDisplay";
+import ActiveAudioPlayback from "./ActiveAudioPlayback";
+import { toast } from "sonner";
 
 const VoiceAgent = () => {
 	const [isCallActive, setIsCallActive] = useState(false);
-	const [vadEnabled, setVadEnabled] = useState(true); // Toggle for auto-stop
 
-	// Empty handler since AudioPlayer component handles playback
-	const handleAudioResponse = useCallback(() => {
-		// Audio playback is handled by AudioPlayer component with autoPlay prop
+	const [activeAudio, setActiveAudio] = useState<{
+		audioBuffer: ArrayBuffer;
+		text: string;
+	} | null>(null);
+
+	const [callEndPending, setCallEndPending] = useState(false);
+
+	const {
+		state: botState,
+		processingSubstatus,
+		reset: resetBotState,
+		setState,
+	} = useBotStateStore();
+
+	const handleCallEnd = useCallback(() => {
+		const ts = new Date().toISOString();
+		console.log(`[VOICE_AGENT ${ts}] Call end pending`);
+		setCallEndPending(true);
 	}, []);
 
-	const { connected, sendAudio, isProcessing, messages, processingStatus } =
-		useSocketConnection(
-			import.meta.env.VITE_SERVER_URL || "http://localhost:3000",
-			handleAudioResponse,
-		);
+	const handleAudioPlaybackEnd = useCallback(() => {
+		setActiveAudio(null);
+
+		if (callEndPending) {
+			const ts = new Date().toISOString();
+			console.log(`[VOICE_AGENT ${ts}] Call ended`);
+			setState("call_ended", "Deflection complete");
+			setIsCallActive(false);
+			setCallEndPending(false);
+		}
+	}, [callEndPending, setState]);
+
+	const { connected, sendAudio, messages, startCall } = useSocketConnection(
+		import.meta.env.VITE_SERVER_URL || "http://localhost:3000",
+		handleCallEnd,
+	);
 
 	const { isRecording, startRecording, stopRecording, error, audioStream } =
 		useAudioRecorder(sendAudio);
 
-	const handleStartCall = async () => {
-		await startRecording();
+	useEffect(() => {
+		if (error) {
+			toast.error(`Error in audio recording: ${error}`, {
+				duration: 5000,
+			});
+		}
+	}, [error]);
+
+	// Watch for new assistant messages with audio and set as active audio
+	useEffect(() => {
+		const lastMessage = messages[messages.length - 1];
+		if (
+			lastMessage?.type === "assistant" &&
+			lastMessage.audioBuffer &&
+			lastMessage.text
+		) {
+			setActiveAudio({
+				audioBuffer: lastMessage.audioBuffer,
+				text: lastMessage.text,
+			});
+		}
+	}, [messages]);
+
+	// Auto-start recording when bot is ready to listen
+	useEffect(() => {
+		if (botState === "listening" && isCallActive && !isRecording) {
+			startRecording();
+		}
+	}, [botState, isCallActive, isRecording, startRecording]);
+
+	// Stop recording when bot starts speaking or processing (Caused bot audio to be sent as human input)
+	useEffect(() => {
+		if ((botState === "speaking" || botState === "processing") && isRecording) {
+			stopRecording();
+		}
+	}, [botState, isRecording, stopRecording]);
+
+	const handleStartCall = () => {
+		startCall();
 		setIsCallActive(true);
 	};
 
-	const handleEndCall = useCallback(() => {
-		stopRecording();
-		setIsCallActive(false);
-	}, [stopRecording]);
-
-	// Auto-stop recording when speech ends (VAD)
-	const handleSpeechEnd = useCallback(() => {
-		if (isRecording && vadEnabled && !isProcessing) {
-			console.log("VAD: Speech ended, auto-stopping recording");
-			handleEndCall();
+	const handleEndCallClick = useCallback(() => {
+		if (isRecording) {
+			stopRecording();
 		}
-	}, [isRecording, vadEnabled, isProcessing, handleEndCall]);
+		setIsCallActive(false);
+		resetBotState();
+	}, [stopRecording, isRecording, resetBotState]);
 
-	// Voice Activity Detection
-	useVoiceActivityDetection(audioStream, isRecording && vadEnabled, {
+	const handleSpeechEnd = useCallback(() => {
+		if (isRecording && botState === "recording") {
+			const ts = new Date().toISOString();
+			console.log(`[VOICE_AGENT ${ts}] Speech ended`);
+			stopRecording();
+		}
+	}, [isRecording, botState, stopRecording]);
+
+	useVoiceActivityDetection(audioStream, isRecording, {
 		onSpeechEnd: handleSpeechEnd,
 		silenceThreshold: 30,
-		silenceDuration: 2000, // 2 seconds of silence
+		silenceDuration: 2000,
 	});
+
+	useEffect(() => {
+		if (isRecording && botState === "listening") {
+			useBotStateStore.getState().setState("recording", "Recording started");
+		}
+	}, [isRecording, botState]);
+
+	const isProcessing = botState === "processing";
+	const isSpeaking = botState === "speaking" || botState === "greeting";
+	const isListening = botState === "listening";
+	const callEnded = botState === "call_ended";
 
 	return (
 		<div className="h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-6">
@@ -63,19 +140,18 @@ const VoiceAgent = () => {
 				<div>
 					<h1 className="text-3xl font-bold mb-2">Wise Voice Agent</h1>
 					<p className="text-muted-foreground">
-						Ask about your money transfer status
+						Call Simulation Mode - Powered by AI
 					</p>
 				</div>
 
-				{/* Tech Stack Info */}
 				<div className="flex items-center gap-4 text-xs text-muted-foreground">
+					<span>Models</span>
+					<span>{`>`}</span>
 					<span>Groq Whisper</span>
 					<span>•</span>
 					<span>Ollama phi3</span>
 					<span>•</span>
 					<span>Piper TTS</span>
-					<span>•</span>
-					<span>Socket.io</span>
 				</div>
 			</div>
 
@@ -85,7 +161,7 @@ const VoiceAgent = () => {
 						<CardHeader>
 							<CardTitle className="text-lg">
 								<div className="flex justify-between">
-									Recording Controls
+									Call Controls
 									<div className="flex items-center justify-center gap-2">
 										<div
 											className={`h-2.5 w-2.5 rounded-full ${
@@ -100,7 +176,43 @@ const VoiceAgent = () => {
 							</CardTitle>
 						</CardHeader>
 						<CardContent className="space-y-4">
-							{isRecording && !isProcessing && (
+							{isCallActive && (
+								<div className="text-xs text-gray-500 border border-gray-200 rounded p-2 bg-gray-50">
+									<span className="font-mono">
+										Bot State: <strong>{botState}</strong>
+									</span>
+								</div>
+							)}
+
+							{isSpeaking && isCallActive && (
+								<div className="flex items-center justify-center gap-3 bg-blue-50 p-4 rounded-lg border-2 border-blue-200">
+									<Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+									<div className="flex flex-col">
+										<span className="text-blue-700 font-semibold">
+											Bot is speaking...
+										</span>
+										<span className="text-blue-600 text-xs">
+											Please wait for response to finish
+										</span>
+									</div>
+								</div>
+							)}
+
+							{isListening && !isRecording && isCallActive && (
+								<div className="flex items-center justify-center gap-3 bg-green-50 p-4 rounded-lg border-2 border-green-200">
+									<div className="h-3 w-3 rounded-full bg-green-500 animate-pulse" />
+									<div className="flex flex-col">
+										<span className="text-green-700 font-semibold">
+											Bot is listening...
+										</span>
+										<span className="text-green-600 text-xs">
+											Recording will start automatically
+										</span>
+									</div>
+								</div>
+							)}
+
+							{isRecording && (
 								<div className="flex items-center justify-center gap-3 bg-red-50 p-4 rounded-lg border-2 border-red-200">
 									<div className="h-3 w-3 rounded-full bg-red-500 animate-pulse" />
 									<div className="flex flex-col">
@@ -108,9 +220,19 @@ const VoiceAgent = () => {
 											Recording...
 										</span>
 										<span className="text-red-600 text-xs">
-											{vadEnabled
-												? "Auto-stops after 2s silence"
-												: "Click stop when done"}
+											Auto-stops after 2s of silence
+										</span>
+									</div>
+								</div>
+							)}
+							{/* Processing Status Card */}
+							{processingSubstatus && (
+								<div className="flex items-center justify-center gap-3 bg-red-50 p-4 rounded-lg border-2 border-red-200">
+									<div className="h-3 w-3 rounded-full bg-red-500 animate-pulse" />
+									<div className="flex flex-col">
+										<Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+										<span className="text-blue-700 font-medium">
+											{processingSubstatus}
 										</span>
 									</div>
 								</div>
@@ -119,110 +241,94 @@ const VoiceAgent = () => {
 							{!isCallActive ? (
 								<Button
 									onClick={handleStartCall}
-									disabled={!connected || isProcessing}
+									disabled={!connected || isProcessing || callEnded}
 									size="lg"
 									className="w-full h-16 text-lg"
 								>
-									<Mic className="mr-2 h-6 w-6" />
-									Start Conversation
+									<Phone className="mr-2 h-6 w-6" />
+									Start Call
 								</Button>
 							) : (
 								<Button
-									onClick={handleEndCall}
+									onClick={handleEndCallClick}
 									variant="destructive"
 									size="lg"
 									className="w-full h-16 text-lg"
-									disabled={isProcessing}
+									disabled={callEnded}
 								>
-									<MicOff className="mr-2 h-6 w-6" />
-									Stop & Send
+									<PhoneOff className="mr-2 h-6 w-6" />
+									End Call
 								</Button>
 							)}
 
-							<div className="flex items-center justify-between bg-muted/50 p-3 rounded-lg">
-								<div className="space-y-0.5">
-									<label htmlFor="vad-toggle" className="text-sm font-medium">
-										Auto-detect silence
-									</label>
-									<p className="text-xs text-muted-foreground">
-										Auto-stop after 2s silence
+							{callEnded && (
+								<div className="bg-orange-50 border border-orange-200 p-4 rounded-lg">
+									<p className="text-sm text-orange-900 font-medium">
+										Call ended - Refresh page to start a new call
 									</p>
 								</div>
-								<Switch
-									id="vad-toggle"
-									checked={vadEnabled}
-									onCheckedChange={setVadEnabled}
-									disabled={isRecording}
-								/>
-							</div>
+							)}
 						</CardContent>
 					</Card>
 
-					{processingStatus && (
-						<Card className="shadow-lg">
-							<CardContent className="pt-6">
-								<div className="flex items-center justify-center gap-3">
-									<Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-									<span className="text-blue-700 font-medium">
-										{processingStatus}
-									</span>
-								</div>
-							</CardContent>
-						</Card>
-					)}
-
-					{messages.length === 0 && !isCallActive && !error && (
-						<Card className="shadow-lg flex-1">
-							<CardHeader>
-								<CardTitle className="text-lg">Instructions</CardTitle>
-							</CardHeader>
-							<CardContent className="space-y-3">
-								<ol className="list-decimal list-inside space-y-2 text-sm">
-									<li>Click "Start Conversation"</li>
-									<li>Allow microphone access</li>
-									<li>Ask your question clearly</li>
-									<li>
-										{vadEnabled
-											? "Pause 2s for auto-stop"
-											: 'Click "Stop & Send"'}
-									</li>
+					{/* Instructions Card */}
+					<Card className="shadow-lg flex-1">
+						<CardHeader>
+							<CardTitle className="text-lg">How It Works</CardTitle>
+						</CardHeader>
+						<CardContent className="flex gap-4">
+							<div className="space-y-2">
+								<p className="text-sm font-medium">Call Simulation:</p>
+								<ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground">
+									<li>Click "Start Call"</li>
+									<li>Bot greets you automatically</li>
+									<li>Recording starts when bot is listening</li>
+									<li>Speak your question clearly</li>
+									<li>Pauses auto-detected (2s silence)</li>
+									<li>Bot answers or transfers to human</li>
 								</ol>
-								<div className="mt-4 p-3 bg-blue-50 rounded-lg">
-									<p className="text-xs font-medium text-blue-900 mb-1">
-										Example questions:
-									</p>
-									<p className="text-xs text-blue-700">
-										• Where is my money?
-										<br />• When will my transfer arrive?
-										<br />• Why is my transfer delayed?
+							</div>
+							<div className="p-4 bg-blue-50 rounded-lg flex-1">
+								<p className="text-xs font-medium text-blue-900 mb-2">
+									Example Questions:
+								</p>
+								<div className="space-y-1 text-xs text-blue-700">
+									<p>✓ "Where is my money?"</p>
+									<p>✓ "When will my transfer arrive?"</p>
+									<p>✓ "Why is my transfer delayed?"</p>
+									<p className="mt-2 pt-2 border-t border-blue-200">
+										✗ "What are your fees?" → Transfers to human
 									</p>
 								</div>
-							</CardContent>
-						</Card>
+							</div>
+						</CardContent>
+					</Card>
+				</div>
+
+				{/* Right Column: Active Audio & Conversation */}
+				<div className="flex flex-col gap-4">
+					{/* Active Audio Playback */}
+					{activeAudio && (
+						<ActiveAudioPlayback
+							audioBuffer={activeAudio.audioBuffer}
+							transcriptText={activeAudio.text}
+							onPlaybackEnd={handleAudioPlaybackEnd}
+						/>
 					)}
 
-					{error && (
-						<Card className="shadow-lg border-destructive">
-							<CardContent className="pt-6">
-								<div className="text-destructive">
-									<p className="font-semibold mb-1">Error</p>
-									<p className="text-sm">{error}</p>
-								</div>
-							</CardContent>
-						</Card>
-					)}
+					{/* Conversation Transcript */}
+					<Card className="flex flex-col shadow-lg flex-1">
+						<CardHeader className="border-b pb-4">
+							<CardTitle className="text-lg">Call Transcript</CardTitle>
+							<CardDescription className="text-xs">
+								Text history of your conversation
+							</CardDescription>
+						</CardHeader>
+						<CardContent className="flex-1 p-0 overflow-hidden">
+							<ConversationDisplay messages={messages} />
+						</CardContent>
+					</Card>
 				</div>
-				<Card className="flex flex-col shadow-lg">
-					<CardHeader className="border-b pb-4">
-						<CardTitle className="text-lg">Conversation</CardTitle>
-						<CardDescription className="text-xs">
-							Your questions and AI responses appear here
-						</CardDescription>
-					</CardHeader>
-					<CardContent className="flex-1 p-0 overflow-hidden">
-						<ConversationDisplay messages={messages} />
-					</CardContent>
-				</Card>
 			</div>
 		</div>
 	);

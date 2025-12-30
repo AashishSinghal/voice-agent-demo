@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { io, Socket } from 'socket.io-client';
+import type { Socket } from 'socket.io-client';
+import { io } from 'socket.io-client';
+import { useBotStateStore } from '../stores/useBotStateStore';
 
 export interface ConversationMessage {
   id: string;
@@ -13,20 +15,20 @@ export interface ConversationMessage {
 interface UseSocketConnectionReturn {
   connected: boolean;
   sendAudio: (audioBlob: Blob) => void;
-  isProcessing: boolean;
   messages: ConversationMessage[];
-  processingStatus: string | null;
+  startCall: () => void;
 }
 
 export const useSocketConnection = (
   serverUrl: string,
-  onAudioResponse: (audioBuffer: ArrayBuffer) => void
+  onCallEnd?: () => void,
+  onBotReady?: () => void
 ): UseSocketConnectionReturn => {
   const socketRef = useRef<Socket | null>(null);
   const [connected, setConnected] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
-  const [processingStatus, setProcessingStatus] = useState<string | null>(null);
+
+  const { setState, setProcessingSubstatus } = useBotStateStore();
 
   const addMessage = useCallback((message: Omit<ConversationMessage, 'id' | 'timestamp'>) => {
     setMessages(prev => [...prev, {
@@ -37,7 +39,6 @@ export const useSocketConnection = (
   }, []);
 
   useEffect(() => {
-    // Initialize socket connection
     const socket = io(serverUrl, {
       transports: ['websocket'],
       reconnection: true,
@@ -50,36 +51,38 @@ export const useSocketConnection = (
 
     // Connection events
     socket.on('connect', () => {
-      console.log('Connected to server');
+      const ts = new Date().toISOString();
+      console.log(`[SOCKET ${ts}] Connected`);
       setConnected(true);
     });
 
     socket.on('disconnect', () => {
-      console.log('Disconnected from server');
+      const ts = new Date().toISOString();
+      console.log(`[SOCKET ${ts}] Disconnected`);
       setConnected(false);
     });
 
-    // Processing status events
     socket.on('processing:start', () => {
-      setIsProcessing(true);
-      setProcessingStatus('Processing audio...');
+      setState('processing', 'Server started processing');
+      setProcessingSubstatus('Processing audio...');
     });
 
     socket.on('processing:stt', () => {
-      setProcessingStatus('Transcribing speech...');
+      setProcessingSubstatus('Transcribing speech...');
     });
 
     socket.on('processing:llm', () => {
-      setProcessingStatus('Generating response...');
+      setProcessingSubstatus('Generating response...');
     });
 
     socket.on('processing:tts', () => {
-      setProcessingStatus('Synthesizing speech...');
+      setProcessingSubstatus('Synthesizing speech...');
     });
 
-    // Transcription complete
     socket.on('transcription:complete', (data: { text: string }) => {
-      console.log('Transcription:', data.text);
+      const ts = new Date().toISOString();
+      console.log(`[SOCKET ${ts}] Transcription: "${data.text}"`);
+
       addMessage({
         type: 'user',
         text: data.text,
@@ -87,9 +90,10 @@ export const useSocketConnection = (
       });
     });
 
-    // Response text (create message without audio first)
     socket.on('response:text', (data: { text: string }) => {
-      console.log('Response text:', data.text);
+      const ts = new Date().toISOString();
+      console.log(`[SOCKET ${ts}] Response: "${data.text}"`);
+
       addMessage({
         type: 'assistant',
         text: data.text,
@@ -97,10 +101,11 @@ export const useSocketConnection = (
       });
     });
 
-    // Audio response events (update the last assistant message with audio)
-    socket.on('response:audio', (data: { audio: ArrayBuffer }) => {
-      setIsProcessing(false);
-      setProcessingStatus(null);
+    socket.on('response:audio', (data: { audio: ArrayBuffer; shouldDeflect?: boolean }) => {
+      const ts = new Date().toISOString();
+      console.log(`[SOCKET ${ts}] Audio received (deflect: ${!!data.shouldDeflect})`);
+
+      setProcessingSubstatus(null);
 
       // Update the last assistant message with audio buffer
       setMessages(prev => {
@@ -118,14 +123,37 @@ export const useSocketConnection = (
         return updated;
       });
 
-      // Don't auto-play here - the AudioPlayer component will handle it
+      setState('speaking', 'Audio received');
+    });
+
+    socket.on('ready:listening', () => {
+      if (onBotReady) {
+        onBotReady();
+      }
+    });
+
+    socket.on('call:end', (data: { reason: string; message: string }) => {
+      const ts = new Date().toISOString();
+      console.log(`[SOCKET ${ts}] Call ending: ${data.reason}`);
+
+      addMessage({
+        type: 'system',
+        text: data.message,
+        status: 'complete',
+      });
+
+      if (onCallEnd) {
+        onCallEnd();
+      }
     });
 
     // Error events
     socket.on('error', (data: { message: string }) => {
-      console.error('Socket error:', data.message);
-      setIsProcessing(false);
-      setProcessingStatus(null);
+      const ts = new Date().toISOString();
+      console.error(`[SOCKET ${ts}] Error: ${data.message}`);
+
+      setProcessingSubstatus(null);
+
       addMessage({
         type: 'system',
         text: `Error: ${data.message}`,
@@ -137,30 +165,42 @@ export const useSocketConnection = (
     return () => {
       socket.disconnect();
     };
-  }, [serverUrl, addMessage]);
+  }, [serverUrl, addMessage, onCallEnd, onBotReady, setState, setProcessingSubstatus]);
 
-  const sendAudio = (audioBlob: Blob) => {
+  const sendAudio = useCallback((audioBlob: Blob) => {
     if (!socketRef.current || !connected) {
-      console.error('Socket not connected');
+      console.error('[SOCKET] Cannot send audio: Not connected');
       return;
     }
 
-    setIsProcessing(true);
-    setProcessingStatus('Uploading audio...');
+    const ts = new Date().toISOString();
+    console.log(`[SOCKET ${ts}] Sending audio (${audioBlob.size} bytes)`);
 
-    // Convert Blob to ArrayBuffer and send
+    setState('processing', 'Sending audio');
+    setProcessingSubstatus('Uploading audio...');
+
     audioBlob.arrayBuffer().then(arrayBuffer => {
-      socketRef.current?.emit('audio:input', {
-        audio: arrayBuffer,
-      });
+      socketRef.current?.emit('audio:input', { audio: arrayBuffer });
     });
-  };
+  }, [connected, setState, setProcessingSubstatus]);
+
+  const startCall = useCallback(() => {
+    if (!socketRef.current || !connected) {
+      console.error('[SOCKET] Cannot start call: Not connected');
+      return;
+    }
+
+    const ts = new Date().toISOString();
+    console.log(`[SOCKET ${ts}] Starting call`);
+
+    setState('call_starting', 'Call started');
+    socketRef.current.emit('call:start');
+  }, [connected, setState]);
 
   return {
     connected,
     sendAudio,
-    isProcessing,
     messages,
-    processingStatus,
+    startCall,
   };
 };

@@ -196,6 +196,49 @@ const io = new Server(httpServer, {
 io.on('connection', (socket) => {
   console.log(`\n🔌 Client connected: ${socket.id}`);
 
+  // Track conversation history for this socket
+  const conversationHistory: any[] = [];
+
+  // Handle call start - send greeting
+  socket.on('call:start', async () => {
+    console.log(`📞 Call started by client: ${socket.id}`);
+
+    try {
+      const greetingText = "Hello! Thank you for calling Wise customer support. How can I help you with your money transfer today?";
+
+      // Add greeting to history
+      conversationHistory.push({
+        role: 'assistant',
+        content: greetingText,
+      });
+
+      // Send greeting text
+      socket.emit('response:text', {
+        text: greetingText,
+        isGreeting: true,
+      });
+
+      // Generate greeting audio
+      socket.emit('processing:tts');
+      const greetingAudio = await piperService.synthesizeSpeechFromText(greetingText);
+
+      socket.emit('response:audio', {
+        audio: greetingAudio,
+        isGreeting: true,
+      });
+
+      // Signal that bot is ready for input
+      socket.emit('ready:listening');
+
+      console.log(`✅ Greeting sent to client\n`);
+    } catch (error) {
+      console.error('❌ Error sending greeting:', error);
+      socket.emit('error', {
+        message: 'Failed to send greeting',
+      });
+    }
+  });
+
   // Handle incoming audio
   socket.on('audio:input', async (data: { audio: ArrayBuffer }) => {
     let convertedPath: string | null = null;
@@ -225,18 +268,30 @@ io.on('connection', (socket) => {
 
       console.log(`📝 Transcription: "${transcription.text}"`);
 
+      // Add user message to conversation history
+      conversationHistory.push({
+        role: 'user',
+        content: transcription.text,
+      });
+
       // Emit transcription to client
       socket.emit('transcription:complete', {
         text: transcription.text,
         confidence: transcription.confidence,
       });
 
-      // 3. Generate response with LLM
+      // 3. Generate response with LLM (with conversation history)
       socket.emit('processing:llm');
-      const response = await ollamaService.generateResponse(transcription.text, []);
+      const response = await ollamaService.generateResponse(transcription.text, conversationHistory);
 
       console.log(`💬 Response: "${response.text}"`);
       console.log(`🚪 Should Deflect: ${response.shouldDeflect}`);
+
+      // Add assistant response to conversation history
+      conversationHistory.push({
+        role: 'assistant',
+        content: response.text,
+      });
 
       // Emit response text to client
       socket.emit('response:text', {
@@ -254,7 +309,29 @@ io.on('connection', (socket) => {
       // Send audio response back to client
       socket.emit('response:audio', {
         audio: audioResponse,
+        shouldDeflect: response.shouldDeflect,
       });
+
+      // If deflecting, end the call after audio finishes
+      if (response.shouldDeflect) {
+        console.log(`🚪 Deflection detected - ending call in 5 seconds...`);
+        setTimeout(() => {
+          socket.emit('call:end', {
+            reason: 'deflection',
+            message: 'Connecting you with a human agent...',
+          });
+          console.log(`📞 Call ended - deflection\n`);
+        }, 5000); // Wait 5s for audio to play
+      } else {
+        // If not deflecting, signal bot is ready for next input after audio finishes
+        // Estimate audio duration and wait for it to finish
+        const estimatedDuration = Math.max(response.text.length * 50, 3000); // ~50ms per character, min 3s
+        console.log(`⏱️ Waiting ${estimatedDuration}ms for audio to finish before listening again...`);
+        setTimeout(() => {
+          socket.emit('ready:listening');
+          console.log(`👂 Bot ready to listen again\n`);
+        }, estimatedDuration);
+      }
 
       // Cleanup
       await audioProcessor.cleanupAudioFile(tempInputPath);
@@ -273,10 +350,41 @@ io.on('connection', (socket) => {
         await audioProcessor.cleanupAudioFile(convertedPath);
       }
 
-      socket.emit('error', {
-        message: 'Failed to process audio',
-        details: error instanceof Error ? error.message : 'Unknown error',
-      });
+      // Send fallback error message with pre-generated audio
+      const fallbackMessage = "I'm having some technical difficulties. Could you please try again?";
+
+      try {
+        // Send error message as text
+        socket.emit('response:text', {
+          text: fallbackMessage,
+          shouldDeflect: false,
+        });
+
+        // Try to generate audio for the fallback message
+        console.log(`🔊 Generating fallback TTS response...`);
+        socket.emit('processing:tts');
+        const fallbackAudio = await piperService.synthesizeSpeechFromText(fallbackMessage);
+
+        socket.emit('response:audio', {
+          audio: fallbackAudio,
+          shouldDeflect: false,
+        });
+
+        // Ready to listen again after fallback message
+        const estimatedDuration = fallbackMessage.length * 50;
+        setTimeout(() => {
+          socket.emit('ready:listening');
+          console.log(`👂 Bot ready to listen again after error recovery\n`);
+        }, estimatedDuration);
+
+      } catch (ttsError) {
+        // If even the fallback TTS fails, just send error to client
+        console.error('❌ Fallback TTS also failed:', ttsError);
+        socket.emit('error', {
+          message: 'Failed to process audio',
+          details: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
     }
   });
 
