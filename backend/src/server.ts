@@ -9,12 +9,18 @@ import fs from 'fs';
 import crypto from 'crypto';
 import * as audioProcessor from './services/audioProcessor.js';
 import * as whisperService from './services/whisperService.js';
-import * as piperService from './services/piperService.js';
+import * as tts from './services/ttsService.js';
 import * as llm from './services/llmService.js';
 import { SentenceChunker } from './services/sentenceChunker.js';
 import type { Message } from './models/types.js';
 
 dotenv.config();
+
+/** The .env.example placeholder counts as unset. */
+function hasGroqKey(): boolean {
+  const key = process.env.GROQ_API_KEY;
+  return !!key && key !== 'your_groq_api_key_here';
+}
 
 const app = express();
 const httpServer = createServer(app);
@@ -38,8 +44,8 @@ app.get('/health', (_, res) => {
     llmProvider: llm.activeProvider(),
     services: {
       ollama: process.env.OLLAMA_HOST || 'http://localhost:11434',
-      groq: process.env.GROQ_API_KEY ? 'configured' : 'missing',
-      piper: process.env.PIPER_BIN || 'piper',
+      groq: hasGroqKey() ? 'configured' : 'missing (set GROQ_API_KEY)',
+      tts: tts.activeTtsProvider(),
     },
   });
 });
@@ -81,7 +87,7 @@ app.post('/api/process-audio', upload.single('audio'), async (req, res) => {
     if (!transcription.text?.trim()) throw new Error('No speech detected in audio');
 
     const response = await generateComplete(transcription.text);
-    const audio = await piperService.synthesizeSpeechFromText(response.text);
+    const audio = await tts.synthesizeSpeechFromText(response.text);
     const audioOutputPath = path.join('uploads', `response_${Date.now()}.wav`);
     await fs.promises.writeFile(audioOutputPath, audio);
 
@@ -166,7 +172,7 @@ io.on('connection', (socket: Socket) => {
     const speak = async (chunk: string) => {
       if (signal.aborted) return;
 
-      const audio = await piperService.synthesizeSpeechFromText(chunk, signal);
+      const audio = await tts.synthesizeSpeechFromText(chunk, signal);
       if (signal.aborted) return;
 
       if (firstAudioMs === null) firstAudioMs = Date.now() - startedAt;
@@ -244,7 +250,7 @@ io.on('connection', (socket: Socket) => {
 
       socket.emit('response:text:delta', { turnId, token: GREETING });
 
-      const audio = await piperService.synthesizeSpeechFromText(GREETING, controller.signal);
+      const audio = await tts.synthesizeSpeechFromText(GREETING, controller.signal);
       if (controller.signal.aborted) return;
 
       socket.emit('response:audio:chunk', { turnId, index: 0, text: GREETING, audio });
