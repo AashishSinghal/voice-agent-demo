@@ -142,10 +142,10 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
       diag.log('socket-in', event, { ...rest, ...(audio ? { audioBytes: audio.byteLength } : {}) });
     });
 
-    // Server-side log lines, interleaved into the same timeline.
-    socket.on('debug:trace', (d: { direction?: string; event: string; detail?: string }) => {
-      diag.log('server', `${d.direction ? `${d.direction} ` : ''}${d.event}`,
-        d.detail ? { detail: d.detail } : undefined);
+    // Every line the server prints, interleaved into the same timeline.
+    socket.on('debug:trace', (d: { level?: string; text?: string }) => {
+      if (!d?.text) return;
+      diag.log('server', d.text, d.level && d.level !== 'log' ? { level: d.level } : undefined);
     });
 
     socket.on('connect', () => {

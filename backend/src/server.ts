@@ -14,9 +14,13 @@ import { SentenceChunker } from './services/sentenceChunker.js';
 import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
 import { Conversation } from './services/conversation.js';
 import { Timeline } from './services/timeline.js';
+import { installLogBridge, subscribeToLogs } from './services/logBridge.js';
 import type { CallState, TurnMetrics } from './models/types.js';
 
 dotenv.config();
+
+// Capture every console line so it can be mirrored to connected clients.
+installLogBridge();
 
 /** The .env.example placeholder counts as unset. */
 function hasGroqKey(): boolean {
@@ -101,27 +105,29 @@ interface Session {
  * diagnostic file contains both halves of the conversation, interleaved.
  * Without that, debugging a timing problem means correlating two logs by hand.
  */
-function traceFactory(socketId: string, mirror: (event: string, payload: unknown) => void) {
+function traceFactory(socketId: string) {
   const short = socketId.slice(0, 6);
   return (direction: '<-' | '->', event: string, detail?: string) => {
-    const at = new Date().toISOString().slice(11, 23);
-    console.log(`${at} [${short}] ${direction} ${event}${detail ? ` ${detail}` : ''}`);
-    mirror('debug:trace', { direction, event, detail });
+    console.log(`[${short}] ${direction} ${event}${detail ? ` ${detail}` : ''}`);
   };
 }
 
-/** Server-side note with no socket direction, also mirrored to the client. */
-function noteFactory(mirror: (event: string, payload: unknown) => void) {
-  return (event: string, data?: Record<string, unknown>) => {
-    mirror('debug:trace', { event, ...(data ? { detail: JSON.stringify(data) } : {}) });
-  };
+/** A server-side note with no socket direction. */
+function note(event: string, data?: Record<string, unknown>) {
+  console.log(`· ${event}${data ? ` ${JSON.stringify(data)}` : ''}`);
 }
 
 io.on('connection', (socket: Socket) => {
-  // Bind the raw emitter first: tracing uses it, and the wrapper below traces.
+  // Bind the raw emitter first: the log bridge uses it, and the wrapper below
+  // logs — going through the wrapper would recurse.
   const rawEmit = socket.emit.bind(socket);
-  const trace = traceFactory(socket.id, (event, payload) => rawEmit(event, payload as never));
-  const note = noteFactory((event, payload) => rawEmit(event, payload as never));
+  const trace = traceFactory(socket.id);
+
+  // Everything this process prints, from here or from any service, goes to the
+  // client so one exported file holds both halves of the conversation.
+  const unsubscribeLogs = subscribeToLogs((line) => {
+    rawEmit('debug:trace', { level: line.level, text: line.text });
+  });
 
   console.log(`🔌 Client connected: ${socket.id}`);
 
@@ -229,7 +235,17 @@ io.on('connection', (socket: Socket) => {
 
     setState('thinking');
 
-    for await (const token of llm.streamResponse(query, session.conversation.history(), signal, resumeHint)) {
+    const finish: { info: llm.FinishInfo | null } = { info: null };
+
+    for await (const token of llm.streamResponse(
+      query,
+      session.conversation.history(),
+      signal,
+      resumeHint,
+      (info) => {
+        finish.info = info;
+      }
+    )) {
       if (signal.aborted) return;
 
       if (firstTokenMs === null) firstTokenMs = Date.now() - startedAt;
@@ -250,6 +266,13 @@ io.on('connection', (socket: Socket) => {
     // actually heard. Commit happens on playback:complete or on interrupt.
     session.pendingText = text;
     session.pendingTurnId = turnId;
+
+    note('generation finished', {
+      turnId,
+      reason: finish.info?.reason ?? 'unreported',
+      tokens: finish.info?.tokens ?? 0,
+      chars: text.length,
+    });
 
     const metrics: TurnMetrics = {
       sttMs,
@@ -383,10 +406,27 @@ io.on('connection', (socket: Socket) => {
    * and stopping for every "mhm" makes the agent unusable.
    */
   socket.on('barge:detected', (data: { turnId: number; chunksPlayed: number }) => {
-    if (data?.turnId !== session.pendingTurnId && data?.turnId !== session.turnId) return;
+    // Accept the barge whenever a turn is in flight. Matching the reported id
+    // exactly was too strict: while playback is paused the client's notion of
+    // the current turn lags the server's, and a dropped barge left the call
+    // without its paused state.
+    const inFlight = session.controller !== null || session.pendingTurnId !== null;
+    if (!inFlight) {
+      note('barge ignored', { turnId: data?.turnId, reason: 'nothing in flight' });
+      return;
+    }
+
+    if (data?.turnId !== session.pendingTurnId && data?.turnId !== session.turnId) {
+      note('barge turn mismatch', {
+        reported: data?.turnId,
+        pending: session.pendingTurnId,
+        current: session.turnId,
+      });
+    }
+
     session.bargeChunksPlayed = data.chunksPlayed ?? 0;
     setState('paused');
-    console.log(`⏸  Barge detected on turn ${data.turnId} after ${session.bargeChunksPlayed} chunks`);
+    console.log(`⏸  Barge on turn ${data?.turnId} after ${session.bargeChunksPlayed} chunks`);
   });
 
   socket.on(
@@ -591,6 +631,7 @@ io.on('connection', (socket: Socket) => {
   }, 2000);
 
   socket.on('disconnect', () => {
+    unsubscribeLogs();
     clearInterval(watchdog);
     abortActiveTurn('client disconnected');
     console.log(`🔌 Client disconnected: ${socket.id}`);

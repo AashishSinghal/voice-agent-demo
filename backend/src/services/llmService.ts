@@ -84,26 +84,34 @@ function buildUserPrompt(query: string, history: Turn[], resumeHint?: string | n
   return parts.join('\n');
 }
 
+/** Why a generation ended — reported so a truncated answer is diagnosable. */
+export interface FinishInfo {
+  reason: string | null;
+  tokens: number;
+}
+
 export async function* streamResponse(
   query: string,
   history: Turn[],
   signal: AbortSignal,
-  resumeHint?: string | null
+  resumeHint?: string | null,
+  onFinish?: (info: FinishInfo) => void
 ): AsyncGenerator<string> {
   const system = systemPrompt();
   const user = buildUserPrompt(query, history, resumeHint);
 
   if (activeProvider() === 'groq') {
-    yield* streamFromGroq(system, user, signal);
+    yield* streamFromGroq(system, user, signal, onFinish);
   } else {
-    yield* streamFromOllama(system, user, signal);
+    yield* streamFromOllama(system, user, signal, onFinish);
   }
 }
 
 async function* streamFromGroq(
   system: string,
   user: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onFinish?: (info: FinishInfo) => void
 ): AsyncGenerator<string> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey || apiKey === 'your_groq_api_key_here') {
@@ -130,17 +138,33 @@ async function* streamFromGroq(
     { signal }
   );
 
+  let finishReason: string | null = null;
+  let tokens = 0;
+
   for await (const chunk of stream) {
     if (signal.aborted) return;
-    const token = chunk.choices[0]?.delta?.content;
-    if (token) yield token;
+
+    const choice = chunk.choices[0];
+    if (choice?.finish_reason) finishReason = choice.finish_reason;
+
+    const token = choice?.delta?.content;
+    if (token) {
+      tokens += 1;
+      yield token;
+    }
   }
+
+  // Without this a truncated answer and a deliberate stop look identical.
+  // "length" means max_tokens; "stop" means the model chose to end; null means
+  // the stream ended without saying why, which points at the transport.
+  onFinish?.({ reason: finishReason, tokens });
 }
 
 async function* streamFromOllama(
   system: string,
   user: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onFinish?: (info: FinishInfo) => void
 ): AsyncGenerator<string> {
   const apiUrl = process.env.OLLAMA_HOST || 'http://localhost:11434';
   const model = process.env.OLLAMA_MODEL || 'phi3';
@@ -163,6 +187,7 @@ async function* streamFromOllama(
 
   // Ollama streams newline-delimited JSON; a chunk may split a line in half.
   let pending = '';
+  let tokens = 0;
 
   for await (const buf of response.data as AsyncIterable<Buffer>) {
     if (signal.aborted) return;
@@ -176,8 +201,14 @@ async function* streamFromOllama(
       if (!trimmed) continue;
       try {
         const parsed = JSON.parse(trimmed);
-        if (parsed.response) yield parsed.response as string;
-        if (parsed.done) return;
+        if (parsed.response) {
+          tokens += 1;
+          yield parsed.response as string;
+        }
+        if (parsed.done) {
+          onFinish?.({ reason: parsed.done_reason ?? 'done', tokens });
+          return;
+        }
       } catch {
         // Partial or malformed line — skip rather than killing the stream.
       }

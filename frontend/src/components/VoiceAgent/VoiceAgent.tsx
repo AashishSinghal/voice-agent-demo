@@ -112,6 +112,23 @@ const VoiceAgent = () => {
   /** How long the caller was actually audible in this recording. */
   const spokenMsRef = useRef(0);
 
+  /**
+   * What to send with the recording being stopped right now.
+   *
+   * Captured at stop time rather than read from live refs in the recorder
+   * callback: onstop is async, the next recording starts before it fires, and
+   * starting it used to reset bargeRef — so an interruption was delivered as
+   * an ordinary turn. The server then never classified it, never told the
+   * client to resume, and playback stayed paused while chunks piled up behind
+   * it.
+   */
+  const pendingSendRef = useRef({
+    duringPlayback: false,
+    spokenChunks: 0,
+    trimStartMs: 0,
+    spokenMs: 0,
+  });
+
   const notifyCompleteRef = useRef<(turnId: number) => void>(() => {});
 
   const playback = useAudioPlayback({
@@ -158,20 +175,7 @@ const VoiceAgent = () => {
     }
 
     markTimeline('audio sent');
-
-    // Tell the server where the caller actually started talking, so the
-    // silence (and any of the agent's own audio) before it can be trimmed.
-    const trimStartMs = Math.max(
-      0,
-      Math.round(speechStartedAtRef.current - recordingStartedAtRef.current - PREROLL_MS)
-    );
-
-    sendAudio(blob, {
-      duringPlayback: bargeRef.current,
-      spokenChunks: spokenAtBargeRef.current,
-      trimStartMs,
-      spokenMs: spokenMsRef.current,
-    });
+    sendAudio(blob, pendingSendRef.current);
   });
 
   useEffect(() => {
@@ -189,7 +193,6 @@ const VoiceAgent = () => {
   const beginRecording = useCallback(() => {
     if (!stream || recorder.isRecording) return;
     sawSpeechRef.current = false;
-    bargeRef.current = false;
     speechStartedAtRef.current = 0;
     recordingStartedAtRef.current = Date.now();
     recorder.startRecording(stream);
@@ -268,7 +271,7 @@ const VoiceAgent = () => {
 
     // The real turn id matters: the server ignores a barge reported against a
     // turn it does not recognise, and then never enters its paused state.
-    notifyBarge(playback.currentTurn() ?? 0, played);
+    notifyBarge(playback.latestTurn() ?? 0, played);
   }, [playback, notifyBarge, trace, setUserSpeaking, startTimeline, markTimeline]);
 
   const handleSpeechEnd = useCallback(() => {
@@ -303,6 +306,18 @@ const VoiceAgent = () => {
     }
 
     markTimeline('caller stopped');
+
+    // Snapshot everything the send depends on, before anything can restart.
+    pendingSendRef.current = {
+      duringPlayback: bargeRef.current,
+      spokenChunks: spokenAtBargeRef.current,
+      trimStartMs: Math.max(
+        0,
+        Math.round(speechStartedAtRef.current - recordingStartedAtRef.current - PREROLL_MS)
+      ),
+      spokenMs,
+    };
+
     trace('speech end', bargeRef.current ? 'sending over-speech' : 'sending turn');
 
     // Optimistic: the server will confirm, but showing "thinking" now removes

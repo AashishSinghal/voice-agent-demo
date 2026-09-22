@@ -37,6 +37,8 @@ export const useAudioPlayback = ({
   const completedTurnRef = useRef<number | null>(null);
   const activeTurnRef = useRef<number | null>(null);
   const chunksPlayedRef = useRef(0);
+  /** Most recent turn we have been sent audio for, played or not. */
+  const latestTurnRef = useRef<number | null>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
 
@@ -163,14 +165,38 @@ export const useAudioPlayback = ({
         playing: playingRef.current,
         paused: pausedRef.current,
       });
-      // A new turn resets the spoken counter.
-      if (activeTurnRef.current !== null && chunk.turnId !== activeTurnRef.current) {
+
+      const isNewTurn = latestTurnRef.current !== null && chunk.turnId !== latestTurnRef.current;
+      latestTurnRef.current = chunk.turnId;
+
+      if (isNewTurn) {
+        // A new turn supersedes whatever came before. If the queue was paused
+        // for an interruption that was then answered as a fresh turn, nothing
+        // will ever un-pause it, and every chunk from here on would queue up
+        // silently behind the pause — audible as the agent going mute while
+        // its text keeps streaming.
+        const stale = queueRef.current.length;
+        queueRef.current = queueRef.current.filter((q) => q.turnId === chunk.turnId);
+
+        if (pausedRef.current || stale > queueRef.current.length) {
+          diag.log('audio', 'superseded by new turn', {
+            turnId: chunk.turnId,
+            droppedChunks: stale - queueRef.current.length,
+            wasPaused: pausedRef.current,
+          });
+          releaseCurrent();
+          pausedRef.current = false;
+          playingRef.current = false;
+          completedTurnRef.current = null;
+          activeTurnRef.current = null;
+        }
         chunksPlayedRef.current = 0;
       }
+
       queueRef.current.push(chunk);
       if (!playingRef.current && !pausedRef.current) playNext();
     },
-    [playNext]
+    [playNext, releaseCurrent]
   );
 
   const markTurnComplete = useCallback((turnId: number) => {
@@ -219,6 +245,7 @@ export const useAudioPlayback = ({
       dropped: queueRef.current.length,
       wasPaused: pausedRef.current,
     });
+    latestTurnRef.current = null;
     queueRef.current = [];
     completedTurnRef.current = null;
     activeTurnRef.current = null;
@@ -232,9 +259,15 @@ export const useAudioPlayback = ({
   /** Sentence chunks fully played for the current turn. */
   const chunksPlayed = useCallback(() => chunksPlayedRef.current, []);
 
-  /** The turn currently being played, if any. Needed to report a barge-in
-   *  against the right turn — the server ignores an unknown one. */
-  const currentTurn = useCallback(() => activeTurnRef.current, []);
+  /**
+   * The most recent turn audio has arrived for.
+   *
+   * Reported when the caller barges in. The turn *currently playing* is the
+   * wrong answer while paused — it stays pinned to whatever was mid-sentence
+   * when the pause began, and the server ignores a barge against a turn it has
+   * already moved past.
+   */
+  const latestTurn = useCallback(() => latestTurnRef.current, []);
 
   /** Start counting again for a new turn. */
   const resetCounter = useCallback(() => {
@@ -250,7 +283,7 @@ export const useAudioPlayback = ({
     resume,
     stop,
     chunksPlayed,
-    currentTurn,
+    latestTurn,
     resetCounter,
     isPlaying,
   };

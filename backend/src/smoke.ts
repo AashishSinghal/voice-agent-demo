@@ -1,5 +1,6 @@
 import { Conversation } from './services/conversation.js';
 import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
+import { installLogBridge, subscribeToLogs, type LogLine } from './services/logBridge.js';
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -98,6 +99,37 @@ for (const [text, spokenMs, expected] of [
   check(`"${text}" @${spokenMs}ms -> ${expected ? 'reject' : 'keep'}`,
     looksHallucinated(text, spokenMs), expected);
 }
+
+console.log('\n--- server logs are mirrored to subscribers ---');
+installLogBridge();
+
+const captured: LogLine[] = [];
+const unsubscribe = subscribeToLogs((line) => captured.push(line));
+
+console.log('plain line', { a: 1 });
+console.warn('a warning');
+console.error(new Error('boom'));
+
+check('forwarded three lines', captured.length, 3);
+check('renders objects', captured[0].text, 'plain line {"a":1}');
+check('keeps the level', captured[1].level, 'warn');
+check('renders errors readably', captured[2].text, 'Error: boom');
+
+// A subscriber that logs must not recurse.
+let reentrant = 0;
+const unsubscribeNoisy = subscribeToLogs(() => {
+  reentrant += 1;
+  if (reentrant < 5) console.log('from inside a subscriber');
+});
+console.log('trigger');
+check('no runaway recursion', reentrant, 1);
+
+unsubscribeNoisy();
+unsubscribe();
+
+const afterUnsubscribe = captured.length;
+console.log('should not be captured');
+check('unsubscribe works', captured.length, afterUnsubscribe);
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
