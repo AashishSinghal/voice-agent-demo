@@ -151,6 +151,12 @@ const VoiceAgent = () => {
   notifyCompleteRef.current = notifyPlaybackComplete;
 
   const recorder = useAudioRecorder((blob) => {
+    // A recorder flushing after the caller hung up must not start a new turn.
+    if (!callActiveRef.current) {
+      diag.log('audio', 'recording dropped', { reason: 'call ended', bytes: blob.size });
+      return;
+    }
+
     markTimeline('audio sent');
 
     // Tell the server where the caller actually started talking, so the
@@ -205,7 +211,14 @@ const VoiceAgent = () => {
       const now = Date.now();
 
       if (!sawSpeechRef.current) {
-        if (now - recordingStartedAtRef.current > IDLE_RECYCLE_MS) {
+        // Only recycle during genuine quiet. Speech needs 250ms of sustained
+        // sound before it is confirmed, so a recycle fired on a timer alone
+        // lands squarely on the start of a sentence and throws the onset away
+        // — which is how "explain software engineering" became "engineering".
+        const level = levelRef.current ?? 0;
+        const quiet = level < (calibrationRef.current?.silenceThreshold ?? 0);
+
+        if (quiet && now - recordingStartedAtRef.current > IDLE_RECYCLE_MS) {
           trace('recycled recording', 'only silence captured');
           recorder.discardRecording();
         }

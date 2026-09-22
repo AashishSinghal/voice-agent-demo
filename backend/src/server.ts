@@ -402,6 +402,14 @@ io.on('connection', (socket: Socket) => {
       try {
         if (!data?.audio) return;
 
+        // The caller has hung up. Recorders can still flush buffered audio
+        // after call:end, and acting on it makes the agent answer into a
+        // finished call.
+        if (session.state === 'ended') {
+          note('ignored audio after call end', { bytes: data.audio.byteLength });
+          return;
+        }
+
         if (!data.duringPlayback) {
           const timeline = new Timeline();
           setState('thinking');

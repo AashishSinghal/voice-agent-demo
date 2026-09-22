@@ -25,7 +25,17 @@ export const useAudioRecorder = (
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-  const discardRef = useRef(false);
+
+  /**
+   * Discard intent, held per recorder instance rather than in a shared ref.
+   *
+   * MediaRecorder.onstop is asynchronous, and the next recording is started as
+   * soon as isRecording flips — before the old recorder's onstop has run. A
+   * single shared flag was therefore reset by the restart, so a recording that
+   * had been explicitly discarded was sent anyway: seconds of silence, which
+   * Whisper turns into "Thank you."
+   */
+  const activeSessionRef = useRef<{ discarded: boolean } | null>(null);
 
   const onAudioDataRef = useRef(onAudioData);
   onAudioDataRef.current = onAudioData;
@@ -34,14 +44,24 @@ export const useAudioRecorder = (
     if (mediaRecorderRef.current?.state === 'recording') return;
 
     try {
+      // Defensive: never leave a previous instance capturing in the background.
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        diag.log('audio', 'stopping stale recorder', {
+          state: mediaRecorderRef.current.state,
+        });
+        mediaRecorderRef.current.stop();
+      }
+
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/webm';
 
       const recorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 128000 });
+      const session = { discarded: false };
+
       mediaRecorderRef.current = recorder;
+      activeSessionRef.current = session;
       chunksRef.current = [];
-      discardRef.current = false;
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) chunksRef.current.push(event.data);
@@ -50,11 +70,13 @@ export const useAudioRecorder = (
       recorder.onstop = () => {
         const chunks = chunksRef.current;
         chunksRef.current = [];
-        mediaRecorderRef.current = null;
+        if (mediaRecorderRef.current === recorder) mediaRecorderRef.current = null;
 
         const size = chunks.reduce((total, chunk) => total + chunk.size, 0);
 
-        if (discardRef.current) {
+        // `session` is captured per instance, so a restart cannot revive a
+        // recording that was meant to be thrown away.
+        if (session.discarded) {
           diag.log('audio', 'recording discarded', { bytes: size });
           return;
         }
@@ -76,15 +98,14 @@ export const useAudioRecorder = (
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current?.state === 'recording') {
-      discardRef.current = false;
       mediaRecorderRef.current.stop();
     }
     setIsRecording(false);
   }, []);
 
   const discardRecording = useCallback(() => {
+    if (activeSessionRef.current) activeSessionRef.current.discarded = true;
     if (mediaRecorderRef.current?.state === 'recording') {
-      discardRef.current = true;
       mediaRecorderRef.current.stop();
     }
     setIsRecording(false);
