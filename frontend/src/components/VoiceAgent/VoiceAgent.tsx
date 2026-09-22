@@ -13,6 +13,12 @@ import { toast } from 'sonner';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
 
+/** Time-domain RMS thresholds. A quiet room sits near 0.005; speech 0.05-0.3. */
+const SPEECH_RMS = 0.045;
+const SILENCE_RMS = 0.02;
+/** Longest single recording before we send it regardless. */
+const MAX_TURN_MS = 15_000;
+
 const CAPTION: Record<CallState, string> = {
   idle: 'Tap to start talking',
   listening: 'Listening',
@@ -27,6 +33,14 @@ const VoiceAgent = () => {
   const [debugOpen, setDebugOpen] = useState(false);
 
   const { state, substatus, reset: resetState, logEvent } = useBotStateStore();
+
+  const trace = useCallback(
+    (label: string, detail?: string) => {
+      console.log(`[AGENT] ${label}${detail ? ` — ${detail}` : ''}`);
+      logEvent(label, detail);
+    },
+    [logEvent]
+  );
   const { stream, acquire, release, error: micError } = useMicStream();
 
   const stateRef = useRef(state);
@@ -41,6 +55,9 @@ const VoiceAgent = () => {
   const spokenAtBargeRef = useRef(0);
   /** Guards against sending a recording that contains no speech. */
   const sawSpeechRef = useRef(false);
+  /** Force-send a recording that runs too long, so a missed speech-end
+   *  cannot leave the caller talking into the void forever. */
+  const maxTurnTimerRef = useRef<number | null>(null);
 
   const notifyCompleteRef = useRef<(turnId: number) => void>(() => {});
 
@@ -94,8 +111,36 @@ const VoiceAgent = () => {
       sawSpeechRef.current = false;
       bargeRef.current = false;
       recorder.startRecording(stream);
+      trace('recording started', 'waiting for speech');
     }
-  }, [state, isCallActive, stream, recorder]);
+  }, [state, isCallActive, stream, recorder, trace]);
+
+  // Safety net: if speech-end never fires (mic too quiet, threshold too high),
+  // send what we have rather than listening forever.
+  useEffect(() => {
+    if (!recorder.isRecording) {
+      if (maxTurnTimerRef.current) {
+        clearTimeout(maxTurnTimerRef.current);
+        maxTurnTimerRef.current = null;
+      }
+      return;
+    }
+
+    maxTurnTimerRef.current = window.setTimeout(() => {
+      if (!sawSpeechRef.current) {
+        trace('no speech detected', 'still listening — check mic level in debug');
+        return;
+      }
+      trace('max turn length', 'force-sending recording');
+      sawSpeechRef.current = false;
+      recorder.stopRecording();
+    }, MAX_TURN_MS);
+
+    return () => {
+      if (maxTurnTimerRef.current) clearTimeout(maxTurnTimerRef.current);
+      maxTurnTimerRef.current = null;
+    };
+  }, [recorder.isRecording, recorder, trace]);
 
   /**
    * Caller started speaking over the agent.
@@ -106,6 +151,7 @@ const VoiceAgent = () => {
    */
   const handleSpeechStart = useCallback(() => {
     sawSpeechRef.current = true;
+    trace('speech start', `state=${stateRef.current}`);
 
     if (stateRef.current !== 'speaking') return;
 
@@ -114,26 +160,33 @@ const VoiceAgent = () => {
     bargeRef.current = true;
 
     playback.pause();
-    logEvent('over-speech', `paused after ${played} chunk(s)`);
+    trace('over-speech', `paused after ${played} chunk(s)`);
     notifyBarge(0, played);
 
     if (stream && !recorder.isRecording) recorder.startRecording(stream);
-  }, [playback, notifyBarge, stream, recorder, logEvent]);
+  }, [playback, notifyBarge, stream, recorder, trace]);
 
   const handleSpeechEnd = useCallback(() => {
-    if (!recorder.isRecording) return;
-    if (!sawSpeechRef.current) return; // silence only — keep waiting
+    if (!recorder.isRecording) {
+      trace('speech end ignored', 'not recording');
+      return;
+    }
+    if (!sawSpeechRef.current) {
+      trace('speech end ignored', 'no speech captured yet');
+      return;
+    }
     sawSpeechRef.current = false;
+    trace('speech end', bargeRef.current ? 'sending over-speech' : 'sending turn');
     recorder.stopRecording();
-  }, [recorder]);
+  }, [recorder, trace]);
 
-  const { levelRef } = useVoiceActivityDetection(stream, isCallActive, {
+  const { levelRef, peakRef } = useVoiceActivityDetection(stream, isCallActive, {
     onSpeechStart: handleSpeechStart,
     onSpeechEnd: handleSpeechEnd,
-    silenceThreshold: 30,
+    silenceThreshold: SILENCE_RMS,
     silenceDuration: 1200,
-    speechThreshold: 45,
-    speechDuration: 300,
+    speechThreshold: SPEECH_RMS,
+    speechDuration: 250,
   });
 
   const handleStart = useCallback(async () => {
@@ -213,6 +266,11 @@ const VoiceAgent = () => {
         onClose={() => setDebugOpen(false)}
         connected={connected}
         metrics={metrics}
+        levelRef={levelRef}
+        peakRef={peakRef}
+        speechThreshold={SPEECH_RMS}
+        silenceThreshold={SILENCE_RMS}
+        isRecording={recorder.isRecording}
       />
     </div>
   );

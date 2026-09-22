@@ -87,8 +87,45 @@ interface Session {
   resumeHint: string | null;
 }
 
+/** Compact, timestamped event log for both directions of the socket. */
+function traceFactory(socketId: string) {
+  const short = socketId.slice(0, 6);
+  return (direction: '<-' | '->', event: string, detail?: string) => {
+    const at = new Date().toISOString().slice(11, 23);
+    console.log(`${at} [${short}] ${direction} ${event}${detail ? ` ${detail}` : ''}`);
+  };
+}
+
 io.on('connection', (socket: Socket) => {
+  const trace = traceFactory(socket.id);
   console.log(`🔌 Client connected: ${socket.id}`);
+
+  // Log every outbound event. Audio payloads are summarised, not dumped.
+  const rawEmit = socket.emit.bind(socket);
+  socket.emit = ((event: string, payload?: Record<string, unknown>) => {
+    let detail = '';
+    if (payload && typeof payload === 'object') {
+      const audio = payload.audio as ArrayBuffer | Buffer | undefined;
+      const parts = Object.entries(payload)
+        .filter(([key]) => key !== 'audio')
+        .map(([key, value]) => `${key}=${typeof value === 'string' ? JSON.stringify(value.slice(0, 48)) : JSON.stringify(value)}`);
+      if (audio) parts.push(`audio=${(audio as { byteLength?: number; length?: number }).byteLength ?? (audio as Buffer).length}B`);
+      detail = parts.join(' ');
+    }
+    trace('->', event, detail);
+    return rawEmit(event, payload as never);
+  }) as typeof socket.emit;
+
+  socket.onAny((event: string, payload?: Record<string, unknown>) => {
+    const audio = payload?.audio as ArrayBuffer | undefined;
+    const parts = payload
+      ? Object.entries(payload)
+          .filter(([key]) => key !== 'audio')
+          .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+      : [];
+    if (audio) parts.push(`audio=${audio.byteLength}B`);
+    trace('<-', event, parts.join(' '));
+  });
 
   const session: Session = {
     conversation: new Conversation(),
@@ -210,7 +247,9 @@ io.on('connection', (socket: Socket) => {
       );
 
       const text = result.text?.trim();
-      return text ? { text, ms: Date.now() - startedAt } : null;
+      const ms = Date.now() - startedAt;
+      console.log(`🗣  transcript (${ms}ms): ${text ? JSON.stringify(text) : '<nothing heard>'}`);
+      return text ? { text, ms } : null;
     } finally {
       await audioProcessor.cleanupAudioFile(tempPath);
       if (convertedPath) await audioProcessor.cleanupAudioFile(convertedPath);

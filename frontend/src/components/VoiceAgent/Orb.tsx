@@ -34,7 +34,12 @@ const Orb = ({ state, levelRef }: OrbProps) => {
     const tick = () => {
       // Only the caller's voice should push the orb around; while the agent
       // speaks, a gentle idle pulse reads better than reacting to its own audio.
-      const target = state === 'listening' || state === 'paused' ? (levelRef.current ?? 0) : 0;
+      // levelRef is time-domain RMS: ~0.05-0.3 for speech. Normalise to 0..1
+      // so the orb reacts across the useful range.
+      const target =
+        state === 'listening' || state === 'paused'
+          ? Math.min(1, (levelRef.current ?? 0) / 0.25)
+          : 0;
       smoothed.current += (target - smoothed.current) * 0.18;
 
       const breath =
