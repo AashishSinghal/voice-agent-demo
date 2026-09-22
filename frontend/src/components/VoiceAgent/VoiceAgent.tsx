@@ -80,7 +80,6 @@ const VoiceAgent = () => {
     userSpeaking,
     setUserSpeaking,
     setState: setCallState,
-    reset: resetState,
     logEvent,
     startTimeline,
     markTimeline,
@@ -139,6 +138,7 @@ const VoiceAgent = () => {
       bargeRef.current = false;
       playback.stop();
     },
+    onCallEnded: () => setIsCallActive(false),
     onReadyToListen: () => {
       // Control is back with the caller, so nothing is mid-playback. Clearing
       // here matters: a pause with no matching resume would otherwise leave
@@ -349,10 +349,11 @@ const VoiceAgent = () => {
     recorder.discardRecording();
     playback.stop();
     release();
-    endCall();
     setIsCallActive(false);
-    resetState();
-  }, [recorder, playback, release, endCall, resetState]);
+    // endCall clears the transcript, metrics and call state together, so the
+    // next call starts from the same blank slate as the first.
+    endCall();
+  }, [recorder, playback, release, endCall]);
 
   useEffect(() => release, [release]);
 

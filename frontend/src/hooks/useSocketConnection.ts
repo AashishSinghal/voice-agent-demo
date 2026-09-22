@@ -40,6 +40,8 @@ interface Handlers {
   /** Over-speech was a real interruption — drop queued audio. */
   onInterrupted: (spokenText: string) => void;
   onReadyToListen: () => void;
+  /** The call is over — the caller hung up, or the server ended it. */
+  onCallEnded: () => void;
 }
 
 export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
@@ -50,6 +52,20 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
 
   const { setState, setSubstatus, logEvent, attachServerMarks, finishTimeline } =
     useBotStateStore();
+
+  /**
+   * Return to the pre-call view.
+   *
+   * Deliberately does not clear the diagnostic log: hanging up is exactly when
+   * someone wants to export it, and it is reset at the start of the next call
+   * instead.
+   */
+  const resetSession = useCallback(() => {
+    setMessages([]);
+    setMetrics(null);
+    useBotStateStore.getState().reset();
+    diag.log('client', 'session reset');
+  }, []);
 
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
@@ -143,6 +159,15 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
 
     // The server is the source of truth for call state.
     socket.on('state', (data: { state: CallState }) => {
+      if (data.state === 'ended') {
+        // Reset rather than parking in a terminal state. Previously the local
+        // reset ran first and this arrived afterwards, so the interface sat on
+        // "Call ended" with the last conversation still on screen.
+        resetSession();
+        handlersRef.current.onCallEnded();
+        return;
+      }
+
       setState(data.state, 'server');
       setSubstatus(
         data.state === 'thinking' ? 'thinking…' : data.state === 'paused' ? 'checking…' : null
@@ -223,6 +248,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     logEvent,
     attachServerMarks,
     finishTimeline,
+    resetSession,
   ]);
 
   const sendAudio = useCallback(
@@ -267,7 +293,11 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
   const endCall = useCallback(() => {
     diag.log('socket-out', 'call:end');
     socketRef.current?.emit('call:end');
-  }, []);
+    // Reset locally too. The server confirms with state 'ended', but if the
+    // socket is down that never arrives and the interface would stay in a call
+    // the caller has already left.
+    resetSession();
+  }, [resetSession]);
 
   /** Caller began speaking over the agent; playback is paused pending triage. */
   const notifyBarge = useCallback((turnId: number, chunksPlayed: number) => {
@@ -287,6 +317,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     sendAudio,
     startCall,
     endCall,
+    resetSession,
     notifyBarge,
     notifyPlaybackComplete,
   };
