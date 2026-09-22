@@ -52,19 +52,34 @@ export const useVoiceActivityDetection = (
     onLevel,
   } = options;
 
-  // Callbacks live in refs so swapping them never rebuilds the audio graph.
+  // Callbacks and tuning live in refs so changing them never rebuilds the
+  // audio graph. silenceDuration in particular is adjusted mid-call — a short
+  // window while triaging over-speech, a longer one for a normal turn — and
+  // rebuilding an AudioContext on every change would glitch the mic.
   const endRef = useRef(onSpeechEnd);
   const startRef = useRef(onSpeechStart);
   const levelCbRef = useRef(onLevel);
+  const tuningRef = useRef({ silenceThreshold, silenceDuration, speechThreshold, speechDuration });
   useEffect(() => {
     endRef.current = onSpeechEnd;
     startRef.current = onSpeechStart;
     levelCbRef.current = onLevel;
-  }, [onSpeechEnd, onSpeechStart, onLevel]);
+    tuningRef.current = { silenceThreshold, silenceDuration, speechThreshold, speechDuration };
+  }, [
+    onSpeechEnd,
+    onSpeechStart,
+    onLevel,
+    silenceThreshold,
+    silenceDuration,
+    speechThreshold,
+    speechDuration,
+  ]);
 
   const check = useCallback(() => {
     const analyser = analyserRef.current;
     if (!analyser) return;
+
+    const tuning = tuningRef.current;
 
     const data = new Uint8Array(analyser.fftSize);
     analyser.getByteTimeDomainData(data);
@@ -82,10 +97,10 @@ export const useVoiceActivityDetection = (
     levelCbRef.current?.(rms);
 
     // --- sustained speech -> onSpeechStart ---
-    if (rms >= speechThreshold) {
+    if (rms >= tuning.speechThreshold) {
       if (speechSinceRef.current === null) speechSinceRef.current = Date.now();
 
-      if (!speakingRef.current && Date.now() - speechSinceRef.current >= speechDuration) {
+      if (!speakingRef.current && Date.now() - speechSinceRef.current >= tuning.speechDuration) {
         speakingRef.current = true;
         console.log(`[VAD] speech start (rms ${rms.toFixed(3)})`);
         startRef.current?.();
@@ -95,16 +110,17 @@ export const useVoiceActivityDetection = (
     }
 
     // --- continuous silence -> onSpeechEnd ---
-    if (rms < silenceThreshold) {
+    if (rms < tuning.silenceThreshold) {
       if (silenceTimerRef.current === null) {
+        const window_ms = tuning.silenceDuration;
         silenceTimerRef.current = window.setTimeout(() => {
           // Clear first: without this the ref stays set and no further
           // silence period can ever arm a new timer.
           silenceTimerRef.current = null;
           speakingRef.current = false;
-          console.log(`[VAD] speech end (${silenceDuration}ms silence)`);
+          console.log(`[VAD] speech end (${window_ms}ms silence)`);
           endRef.current?.();
-        }, silenceDuration);
+        }, window_ms);
       }
     } else if (silenceTimerRef.current !== null) {
       clearTimeout(silenceTimerRef.current);
@@ -112,7 +128,7 @@ export const useVoiceActivityDetection = (
     }
 
     frameRef.current = requestAnimationFrame(check);
-  }, [silenceThreshold, silenceDuration, speechThreshold, speechDuration]);
+  }, []);
 
   useEffect(() => {
     if (!audioStream || !enabled) return;
@@ -145,7 +161,7 @@ export const useVoiceActivityDetection = (
       if (audioContext.state !== 'closed') audioContext.close();
       console.log('[VAD] stopped');
     };
-  }, [audioStream, enabled, check, speechThreshold, silenceThreshold, silenceDuration]);
+  }, [audioStream, enabled, check]);
 
   return { levelRef, peakRef };
 };

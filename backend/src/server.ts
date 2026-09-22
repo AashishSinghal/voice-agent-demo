@@ -13,6 +13,7 @@ import * as llm from './services/llmService.js';
 import { SentenceChunker } from './services/sentenceChunker.js';
 import { classifyUtterance } from './services/backchannel.js';
 import { Conversation } from './services/conversation.js';
+import { Timeline } from './services/timeline.js';
 import type { CallState, TurnMetrics } from './models/types.js';
 
 dotenv.config();
@@ -227,7 +228,10 @@ io.on('connection', (socket: Socket) => {
   };
 
   /** Transcribe a recorded blob. Returns null if nothing usable was heard. */
-  const transcribe = async (audio: ArrayBuffer): Promise<{ text: string; ms: number } | null> => {
+  const transcribe = async (
+    audio: ArrayBuffer,
+    timeline?: Timeline
+  ): Promise<{ text: string; ms: number } | null> => {
     const tempPath = path.join(
       'uploads',
       `input_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.webm`
@@ -239,12 +243,14 @@ io.on('connection', (socket: Socket) => {
       await fs.promises.mkdir('uploads', { recursive: true });
       await fs.promises.writeFile(tempPath, Buffer.from(audio));
       convertedPath = await audioProcessor.convertToWav(tempPath);
+      timeline?.mark('audio converted');
 
       const result = await withTimeout(
         whisperService.transcribeAudioToText(convertedPath),
         STT_TIMEOUT_MS,
         'Transcription'
       );
+      timeline?.mark('transcribed');
 
       const text = result.text?.trim();
       const ms = Date.now() - startedAt;
@@ -337,14 +343,23 @@ io.on('connection', (socket: Socket) => {
         if (!data?.audio) return;
 
         if (!data.duringPlayback) {
+          const timeline = new Timeline();
           setState('thinking');
-          const result = await transcribe(data.audio);
+
+          const result = await transcribe(data.audio, timeline);
           if (!result) {
             setState('listening');
             socket.emit('ready:listening', { turnId: session.turnId });
             return;
           }
+
           socket.emit('transcription:complete', { text: result.text });
+          socket.emit('turn:timeline', {
+            kind: 'turn',
+            marks: timeline.snapshot(),
+            total: timeline.total,
+          });
+
           await handleUtterance(result.text, result.ms);
           return;
         }
@@ -353,17 +368,36 @@ io.on('connection', (socket: Socket) => {
         const spokenChunks = data.spokenChunks ?? session.bargeChunksPlayed;
         const interruptedTurnId = session.pendingTurnId ?? session.turnId;
 
-        const result = await transcribe(data.audio);
+        const timeline = new Timeline();
+
+        const result = await transcribe(data.audio, timeline);
         const classification = classifyUtterance(result?.text ?? '');
+        timeline.mark(`classified ${classification.kind}`);
 
         console.log(
           `🔎 Over-speech classified as ${classification.kind}: "${classification.normalised}"`
         );
 
+        // The caller said something either way — it belongs in the transcript,
+        // marked so a backchannel is not mistaken for a real question.
+        if (result?.text) {
+          socket.emit('transcription:complete', {
+            text: result.text,
+            overSpeech: true,
+            kind: classification.kind,
+          });
+        }
+
         if (classification.kind === 'backchannel') {
           // Not an interruption — pick up exactly where playback paused.
           socket.emit('playback:resume', { turnId: interruptedTurnId });
           setState('speaking');
+          console.log(`⏱  backchannel handled: ${timeline.format()} · total ${timeline.total}ms`);
+          socket.emit('turn:timeline', {
+            kind: 'backchannel',
+            marks: timeline.snapshot(),
+            total: timeline.total,
+          });
           return;
         }
 
@@ -374,7 +408,15 @@ io.on('connection', (socket: Socket) => {
         session.pendingText = null;
         session.pendingTurnId = null;
 
+        timeline.mark('interrupt committed');
         socket.emit('turn:interrupted', { turnId: interruptedTurnId, spokenText: spoken });
+
+        console.log(`⏱  interruption handled: ${timeline.format()} · total ${timeline.total}ms`);
+        socket.emit('turn:timeline', {
+          kind: 'interruption',
+          marks: timeline.snapshot(),
+          total: timeline.total,
+        });
 
         if (classification.kind === 'resume') {
           session.resumeHint = session.conversation.lastUnspoken();

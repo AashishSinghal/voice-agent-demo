@@ -30,13 +30,28 @@ const Transcript = ({ messages }: TranscriptProps) => {
         }
 
         const isUser = message.type === 'user';
+        // Over-speech is shown dimmer and labelled, so a "mhm" that did not
+        // stop the agent is not mistaken for a question it ignored.
+        const isAside = isUser && message.overSpeech && message.kind === 'backchannel';
+
         return (
           <div key={message.id} className={isUser ? 'text-right' : 'text-left'}>
+            {isUser && message.overSpeech && (
+              <div className="mb-0.5 text-[10px] uppercase tracking-wider text-zinc-600">
+                {message.kind === 'backchannel'
+                  ? 'while agent spoke · not an interruption'
+                  : message.kind === 'resume'
+                    ? 'while agent spoke · resume'
+                    : 'interrupted the agent'}
+              </div>
+            )}
             <span
               className={[
                 'inline-block max-w-[85%] rounded-2xl px-4 py-2 text-sm leading-relaxed',
                 isUser
-                  ? 'bg-white/10 text-zinc-100'
+                  ? isAside
+                    ? 'bg-white/5 text-zinc-500 italic'
+                    : 'bg-white/10 text-zinc-100'
                   : 'bg-transparent text-zinc-300',
               ].join(' ')}
             >

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
-import { useBotStateStore } from '../../stores/useBotStateStore';
+import { useBotStateStore, median, type TimelineKind } from '../../stores/useBotStateStore';
 import type { TurnMetrics } from '../../hooks/useSocketConnection';
 
 interface DebugPanelProps {
@@ -108,7 +108,7 @@ const DebugPanel = ({
   silenceThreshold,
   isRecording,
 }: DebugPanelProps) => {
-  const { state, events } = useBotStateStore();
+  const { state, events, timeline, benchmarks } = useBotStateStore();
 
   return (
     <aside
@@ -166,6 +166,57 @@ const DebugPanel = ({
           <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
             First audio is what the caller feels. It lands well before the full
             response because each sentence is synthesised as it is generated.
+          </p>
+        </section>
+
+        <section>
+          <h3 className="mb-1 text-[11px] uppercase tracking-wider text-zinc-600">
+            Last turn timeline
+          </h3>
+          {timeline.length === 0 ? (
+            <p className="text-xs text-zinc-600">Nothing recorded yet.</p>
+          ) : (
+            <div className="space-y-0.5">
+              {timeline.map((mark, i) => (
+                <div key={`${mark.label}-${i}`} className="flex justify-between font-mono text-[11px]">
+                  <span className={mark.source === 'server' ? 'text-zinc-500' : 'text-zinc-300'}>
+                    {mark.source === 'server' ? '  ↳ ' : ''}
+                    {mark.label}
+                  </span>
+                  <span className="text-zinc-400">+{mark.delta}ms</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
+            Indented rows are the server's internal stages. The gap between
+            "audio sent" and the decision is the network round trip plus
+            transcription.
+          </p>
+        </section>
+
+        <section>
+          <h3 className="mb-1 text-[11px] uppercase tracking-wider text-zinc-600">
+            Reaction benchmark
+          </h3>
+          {(['interruption', 'backchannel'] as TimelineKind[]).map((kind) => {
+            const bench = benchmarks[kind];
+            return (
+              <Row
+                key={kind}
+                label={kind === 'interruption' ? 'stop on interrupt' : 'resume after "mhm"'}
+                value={
+                  bench.last === null
+                    ? '—'
+                    : `${bench.last} ms · med ${median(bench.samples)} (n=${bench.samples.length})`
+                }
+              />
+            );
+          })}
+          <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
+            Measured from the moment the caller's voice is detected to the
+            moment the agent acts on it. Under ~300 ms feels immediate; over a
+            second feels broken.
           </p>
         </section>
 

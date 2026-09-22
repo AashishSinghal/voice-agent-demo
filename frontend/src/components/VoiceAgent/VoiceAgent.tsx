@@ -19,6 +19,17 @@ const SILENCE_RMS = 0.02;
 /** Longest single recording before we send it regardless. */
 const MAX_TURN_MS = 15_000;
 
+/**
+ * How long a pause has to last before the caller is considered finished.
+ *
+ * A normal turn can afford to wait — cutting someone off mid-thought is worse
+ * than a short pause. Triaging over-speech cannot: the agent is already silent
+ * and every extra millisecond is dead air before it either resumes or answers.
+ * Backchannels are short by nature, so a much tighter window is safe there.
+ */
+const ENDPOINT_MS = 900;
+const ENDPOINT_OVER_SPEECH_MS = 450;
+
 const CAPTION: Record<CallState, string> = {
   idle: 'Tap to start talking',
   listening: 'Listening',
@@ -32,7 +43,17 @@ const VoiceAgent = () => {
   const [isCallActive, setIsCallActive] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
 
-  const { state, substatus, reset: resetState, logEvent } = useBotStateStore();
+  const {
+    state,
+    substatus,
+    userSpeaking,
+    setUserSpeaking,
+    setState: setCallState,
+    reset: resetState,
+    logEvent,
+    startTimeline,
+    markTimeline,
+  } = useBotStateStore();
 
   const trace = useCallback(
     (label: string, detail?: string) => {
@@ -93,6 +114,7 @@ const VoiceAgent = () => {
   notifyCompleteRef.current = notifyPlaybackComplete;
 
   const recorder = useAudioRecorder((blob) => {
+    markTimeline('audio sent');
     sendAudio(blob, {
       duringPlayback: bargeRef.current,
       spokenChunks: spokenAtBargeRef.current,
@@ -151,20 +173,29 @@ const VoiceAgent = () => {
    */
   const handleSpeechStart = useCallback(() => {
     sawSpeechRef.current = true;
+    // Reflect this immediately. Waiting for the server to say so costs a round
+    // trip and makes the interface feel a beat behind the caller.
+    setUserSpeaking(true);
     trace('speech start', `state=${stateRef.current}`);
 
     if (stateRef.current !== 'speaking') return;
+
+    // Clock starts the instant we hear the caller over the agent — this is
+    // what "how fast does it react to an interruption" actually means.
+    startTimeline('interruption');
+    markTimeline('speech detected');
 
     const played = playback.chunksPlayed();
     spokenAtBargeRef.current = played;
     bargeRef.current = true;
 
     playback.pause();
+    markTimeline('playback paused');
     trace('over-speech', `paused after ${played} chunk(s)`);
     notifyBarge(0, played);
 
     if (stream && !recorder.isRecording) recorder.startRecording(stream);
-  }, [playback, notifyBarge, stream, recorder, trace]);
+  }, [playback, notifyBarge, stream, recorder, trace, setUserSpeaking, startTimeline, markTimeline]);
 
   const handleSpeechEnd = useCallback(() => {
     if (!recorder.isRecording) {
@@ -176,15 +207,22 @@ const VoiceAgent = () => {
       return;
     }
     sawSpeechRef.current = false;
+    setUserSpeaking(false);
+    markTimeline('caller stopped');
     trace('speech end', bargeRef.current ? 'sending over-speech' : 'sending turn');
+
+    // Optimistic: the server will confirm, but showing "thinking" now removes
+    // a visible round trip of dead air.
+    if (!bargeRef.current) setCallState('thinking', 'optimistic (audio sent)');
+
     recorder.stopRecording();
-  }, [recorder, trace]);
+  }, [recorder, trace, setUserSpeaking, markTimeline, setCallState]);
 
   const { levelRef, peakRef } = useVoiceActivityDetection(stream, isCallActive, {
     onSpeechStart: handleSpeechStart,
     onSpeechEnd: handleSpeechEnd,
     silenceThreshold: SILENCE_RMS,
-    silenceDuration: 1200,
+    silenceDuration: state === 'paused' ? ENDPOINT_OVER_SPEECH_MS : ENDPOINT_MS,
     speechThreshold: SPEECH_RMS,
     speechDuration: 250,
   });
@@ -232,7 +270,11 @@ const VoiceAgent = () => {
         <Orb state={state} levelRef={levelRef} />
 
         <div className="h-6 text-center">
-          <p className="text-sm text-zinc-400">{substatus ?? CAPTION[state]}</p>
+          <p className="text-sm text-zinc-400">
+            {userSpeaking && (state === 'listening' || state === 'paused')
+              ? 'Hearing you…'
+              : (substatus ?? CAPTION[state])}
+          </p>
         </div>
 
         <div className="min-h-0 w-full flex-1 overflow-hidden">

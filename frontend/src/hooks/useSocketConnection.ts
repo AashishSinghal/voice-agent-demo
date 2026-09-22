@@ -10,6 +10,10 @@ export interface ConversationMessage {
   timestamp: Date;
   status?: 'streaming' | 'complete' | 'error' | 'interrupted';
   turnId?: number;
+  /** User turns only: spoken over the agent rather than in reply to it. */
+  overSpeech?: boolean;
+  /** User turns only: how the over-speech was classified. */
+  kind?: 'backchannel' | 'resume' | 'interruption';
 }
 
 export interface TurnMetrics {
@@ -43,7 +47,8 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [metrics, setMetrics] = useState<TurnMetrics | null>(null);
 
-  const { setState, setSubstatus, logEvent } = useBotStateStore();
+  const { setState, setSubstatus, logEvent, attachServerMarks, finishTimeline } =
+    useBotStateStore();
 
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
@@ -113,9 +118,26 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
       );
     });
 
-    socket.on('transcription:complete', (data: { text: string }) => {
-      addMessage({ type: 'user', text: data.text, status: 'complete' });
-    });
+    socket.on(
+      'transcription:complete',
+      (data: { text: string; overSpeech?: boolean; kind?: ConversationMessage['kind'] }) => {
+        addMessage({
+          type: 'user',
+          text: data.text,
+          status: 'complete',
+          overSpeech: data.overSpeech,
+          kind: data.kind,
+        });
+      }
+    );
+
+    // Server-side stage breakdown for the turn just handled.
+    socket.on(
+      'turn:timeline',
+      (data: { marks: { label: string; at: number; delta: number }[] }) => {
+        attachServerMarks(data.marks ?? []);
+      }
+    );
 
     socket.on('response:text:delta', (d: { turnId: number; token: string }) =>
       appendDelta(d.turnId, d.token)
@@ -136,11 +158,13 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     );
 
     socket.on('playback:resume', () => {
+      finishTimeline('playback resumed', 'backchannel');
       logEvent('backchannel', 'not an interruption — resuming');
       handlersRef.current.onResumePlayback();
     });
 
     socket.on('turn:interrupted', (d: { turnId: number; spokenText: string }) => {
+      finishTimeline('interrupt confirmed', 'interruption');
       logEvent('interrupted', `heard: "${d.spokenText.slice(0, 40)}…"`);
       // Show only what the caller actually heard.
       finalise(d.turnId, 'interrupted', d.spokenText);
@@ -158,7 +182,17 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     return () => {
       socket.disconnect();
     };
-  }, [serverUrl, addMessage, appendDelta, finalise, setState, setSubstatus, logEvent]);
+  }, [
+    serverUrl,
+    addMessage,
+    appendDelta,
+    finalise,
+    setState,
+    setSubstatus,
+    logEvent,
+    attachServerMarks,
+    finishTimeline,
+  ]);
 
   const sendAudio = useCallback(
     (blob: Blob, opts: { duringPlayback: boolean; spokenChunks: number }) => {

@@ -93,6 +93,43 @@ The browser will only grant the mic on `localhost` or over HTTPS.
 Open **debug** (top right) for live call state, per-stage latency, and the
 event log showing each interruption being classified.
 
+## Latency budget
+
+Interruption handling is a pipeline, and the caller feels the sum of it. The
+debug panel measures each stage live; these are the fixed costs.
+
+| Stage | Cost | Notes |
+|---|---|---|
+| Detect the caller's voice | **250 ms** | `speechDuration` — sustained sound before we believe it's speech. Lower it and a cough stops the agent. |
+| Pause playback | ~0 ms | Local; the agent goes quiet almost immediately. |
+| Wait for the caller to finish | **450 ms** over-speech / **900 ms** normal turn | `ENDPOINT_OVER_SPEECH_MS` / `ENDPOINT_MS`. The single largest controllable cost. |
+| Upload + convert audio | ~100-150 ms | ffmpeg webm → 16 kHz wav. |
+| Transcribe | **300-500 ms** | Groq Whisper. Network-bound. |
+| Classify | <5 ms | A set lookup, deliberately not a model call. |
+
+**The agent stops talking after ~250 ms** — that part feels instant, because
+pausing does not wait for the transcript.
+
+**The decision costs ~900-1100 ms** on top, because classifying over-speech
+needs the words, and the words need the caller to stop. That is the number to
+watch in the benchmark panel.
+
+Two thresholds are deliberately different: over-speech uses a much tighter
+endpointing window (450 ms) than a normal turn (900 ms). While the agent is
+paused every millisecond is dead air, and backchannels are short by nature, so
+waiting a full turn-length pause to recognise "mhm" is wasted time.
+
+### Targets
+
+| Measure | Good | Acceptable | Broken |
+|---|---|---|---|
+| Agent goes quiet on interrupt | <300 ms | <500 ms | >800 ms |
+| Resume after a backchannel | <800 ms | <1200 ms | >1500 ms |
+| First audio of a reply | <900 ms | <1500 ms | >2500 ms |
+
+If the decision time is consistently over ~1.2 s, the endpointing window is the
+first thing to cut — not the model.
+
 ## Configuration
 
 Everything is provider-pluggable so the same code runs locally and deployed.
