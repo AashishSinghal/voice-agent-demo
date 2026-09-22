@@ -1,361 +1,221 @@
-import { useState, useCallback, useEffect, useRef } from "react";
-import { useAudioRecorder } from "../../hooks/useAudioRecorder";
-import { useAudioPlayback } from "../../hooks/useAudioPlayback";
-import { useMicStream } from "../../hooks/useMicStream";
-import { useSocketConnection } from "../../hooks/useSocketConnection";
-import { useVoiceActivityDetection } from "../../hooks/useVoiceActivityDetection";
-import { useBotStateStore } from "../../stores/useBotStateStore";
-import { Button } from "../ui/button";
-import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "../ui/card";
-import { Phone, PhoneOff, Loader2, Zap } from "lucide-react";
-import ConversationDisplay from "./ConversationDisplay";
-import { toast } from "sonner";
+import { useState, useCallback, useEffect, useRef } from 'react';
+import { Mic, PhoneOff, SlidersHorizontal } from 'lucide-react';
+import { useAudioRecorder } from '../../hooks/useAudioRecorder';
+import { useAudioPlayback } from '../../hooks/useAudioPlayback';
+import { useMicStream } from '../../hooks/useMicStream';
+import { useSocketConnection } from '../../hooks/useSocketConnection';
+import { useVoiceActivityDetection } from '../../hooks/useVoiceActivityDetection';
+import { useBotStateStore, type CallState } from '../../stores/useBotStateStore';
+import Orb from './Orb';
+import Transcript from './Transcript';
+import DebugPanel from './DebugPanel';
+import { toast } from 'sonner';
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3000";
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
+
+const CAPTION: Record<CallState, string> = {
+  idle: 'Tap to start talking',
+  listening: 'Listening',
+  thinking: 'Thinking',
+  speaking: 'Speaking — just talk to interrupt',
+  paused: 'Go on…',
+  ended: 'Call ended',
+};
 
 const VoiceAgent = () => {
-	const [isCallActive, setIsCallActive] = useState(false);
-	const [callEndPending, setCallEndPending] = useState(false);
-	const [didBargeIn, setDidBargeIn] = useState(false);
+  const [isCallActive, setIsCallActive] = useState(false);
+  const [debugOpen, setDebugOpen] = useState(false);
 
-	const {
-		state: botState,
-		processingSubstatus,
-		reset: resetBotState,
-		setState,
-	} = useBotStateStore();
+  const { state, substatus, reset: resetState, logEvent } = useBotStateStore();
+  const { stream, acquire, release, error: micError } = useMicStream();
 
-	const { stream, acquire, release, error: micError } = useMicStream();
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
-	// Latest bot state, readable from callbacks without re-subscribing them.
-	const botStateRef = useRef(botState);
-	botStateRef.current = botState;
+  const callActiveRef = useRef(isCallActive);
+  callActiveRef.current = isCallActive;
 
-	const isCallActiveRef = useRef(isCallActive);
-	isCallActiveRef.current = isCallActive;
+  /** True while the current recording is over-speech rather than a normal turn. */
+  const bargeRef = useRef(false);
+  /** Chunks the agent had fully spoken when the caller cut in. */
+  const spokenAtBargeRef = useRef(0);
+  /** Guards against sending a recording that contains no speech. */
+  const sawSpeechRef = useRef(false);
 
-	// --- playback -----------------------------------------------------------
+  const notifyCompleteRef = useRef<(turnId: number) => void>(() => {});
 
-	const notifyRef = useRef<(turnId: number) => void>(() => {});
+  const playback = useAudioPlayback({
+    onTurnPlayed: (turnId) => notifyCompleteRef.current(turnId),
+  });
 
-	const { enqueue, markTurnComplete, stop: stopPlayback } = useAudioPlayback({
-		onTurnPlayed: (turnId) => {
-			// Real completion signal — replaces the old character-count timer.
-			notifyRef.current(turnId);
-			if (callEndPending) {
-				setState("call_ended", "Deflection complete");
-				setIsCallActive(false);
-				setCallEndPending(false);
-			}
-		},
-	});
+  const {
+    connected,
+    messages,
+    metrics,
+    sendAudio,
+    startCall,
+    endCall,
+    notifyBarge,
+    notifyPlaybackComplete,
+  } = useSocketConnection(SERVER_URL, {
+    onAudioChunk: (chunk) => playback.enqueue(chunk),
+    onTurnComplete: (turnId) => playback.markTurnComplete(turnId),
+    onResumePlayback: () => {
+      bargeRef.current = false;
+      playback.resume();
+    },
+    onInterrupted: () => {
+      bargeRef.current = false;
+      playback.stop();
+    },
+    onReadyToListen: () => {
+      playback.resetCounter();
+    },
+  });
 
-	// --- socket -------------------------------------------------------------
+  notifyCompleteRef.current = notifyPlaybackComplete;
 
-	const {
-		connected,
-		messages,
-		metrics,
-		sendAudio,
-		startCall,
-		interrupt,
-		notifyPlaybackComplete,
-	} = useSocketConnection(SERVER_URL, {
-		onAudioChunk: (chunk) => enqueue(chunk),
-		onTurnComplete: (turnId) => markTurnComplete(turnId),
-		onCancelled: () => setState("listening", "Turn cancelled by barge-in"),
-		onReadyToListen: () => {
-			if (isCallActiveRef.current) setState("listening", "Server ready");
-		},
-		onCallEnd: () => setCallEndPending(true),
-	});
+  const recorder = useAudioRecorder((blob) => {
+    sendAudio(blob, {
+      duringPlayback: bargeRef.current,
+      spokenChunks: spokenAtBargeRef.current,
+    });
+  });
 
-	notifyRef.current = notifyPlaybackComplete;
+  useEffect(() => {
+    const error = micError || recorder.error;
+    if (error) toast.error(error);
+  }, [micError, recorder.error]);
 
-	// --- recording ----------------------------------------------------------
+  // Capture continuously whenever the agent is waiting on the caller.
+  useEffect(() => {
+    if (!isCallActive || !stream) return;
+    if (state === 'listening' && !recorder.isRecording) {
+      sawSpeechRef.current = false;
+      bargeRef.current = false;
+      recorder.startRecording(stream);
+    }
+  }, [state, isCallActive, stream, recorder]);
 
-	const { isRecording, startRecording, stopRecording, discardRecording, error: recorderError } =
-		useAudioRecorder(sendAudio);
+  /**
+   * Caller started speaking over the agent.
+   *
+   * Playback is paused rather than dropped, and nothing is cancelled yet — this
+   * might only be "mhm". The server decides once it has heard the words, and
+   * either tells us to resume or confirms the interruption.
+   */
+  const handleSpeechStart = useCallback(() => {
+    sawSpeechRef.current = true;
 
-	useEffect(() => {
-		const error = micError || recorderError;
-		if (error) toast.error(error, { duration: 5000 });
-	}, [micError, recorderError]);
+    if (stateRef.current !== 'speaking') return;
 
-	// Start capturing as soon as the agent is ready for the caller to speak.
-	useEffect(() => {
-		if (botState === "listening" && isCallActive && !isRecording && stream) {
-			startRecording(stream);
-			setState("recording", "Recording started");
-		}
-	}, [botState, isCallActive, isRecording, stream, startRecording, setState]);
+    const played = playback.chunksPlayed();
+    spokenAtBargeRef.current = played;
+    bargeRef.current = true;
 
-	// --- turn boundaries ----------------------------------------------------
+    playback.pause();
+    logEvent('over-speech', `paused after ${played} chunk(s)`);
+    notifyBarge(0, played);
 
-	const handleSpeechEnd = useCallback(() => {
-		if (botStateRef.current === "recording") {
-			stopRecording(); // flushes the blob to the server
-			setState("processing", "Caller finished speaking");
-		}
-	}, [stopRecording, setState]);
+    if (stream && !recorder.isRecording) recorder.startRecording(stream);
+  }, [playback, notifyBarge, stream, recorder, logEvent]);
 
-	/**
-	 * Barge-in. If the caller speaks while the agent is talking, silence the
-	 * agent immediately, tell the server to abandon the turn, and start
-	 * recording the interruption.
-	 */
-	const handleSpeechStart = useCallback(() => {
-		const state = botStateRef.current;
-		if (state !== "speaking" && state !== "greeting") return;
+  const handleSpeechEnd = useCallback(() => {
+    if (!recorder.isRecording) return;
+    if (!sawSpeechRef.current) return; // silence only — keep waiting
+    sawSpeechRef.current = false;
+    recorder.stopRecording();
+  }, [recorder]);
 
-		console.log("[VOICE_AGENT] Barge-in detected");
-		stopPlayback();
-		interrupt();
-		setDidBargeIn(true);
-		setState("listening", "Caller interrupted");
-	}, [stopPlayback, interrupt, setState]);
+  const { levelRef } = useVoiceActivityDetection(stream, isCallActive, {
+    onSpeechStart: handleSpeechStart,
+    onSpeechEnd: handleSpeechEnd,
+    silenceThreshold: 30,
+    silenceDuration: 1200,
+    speechThreshold: 45,
+    speechDuration: 300,
+  });
 
-	// VAD runs for the whole call, not just while recording, so it can hear the
-	// caller talk over the agent.
-	useVoiceActivityDetection(stream, isCallActive, {
-		onSpeechEnd: handleSpeechEnd,
-		onSpeechStart: handleSpeechStart,
-		silenceThreshold: 30,
-		silenceDuration: 2000,
-		speechThreshold: 45,
-		speechDuration: 300,
-	});
+  const handleStart = useCallback(async () => {
+    const micStream = await acquire();
+    if (!micStream) return;
+    setIsCallActive(true);
+    startCall();
+  }, [acquire, startCall]);
 
-	// --- call control -------------------------------------------------------
+  const handleEnd = useCallback(() => {
+    recorder.discardRecording();
+    playback.stop();
+    release();
+    endCall();
+    setIsCallActive(false);
+    resetState();
+  }, [recorder, playback, release, endCall, resetState]);
 
-	const handleStartCall = useCallback(async () => {
-		const micStream = await acquire();
-		if (!micStream) return;
+  useEffect(() => release, [release]);
 
-		setDidBargeIn(false);
-		setIsCallActive(true);
-		startCall();
-	}, [acquire, startCall]);
+  return (
+    <div className="relative flex h-screen flex-col bg-zinc-950 text-zinc-100">
+      <style>{`@keyframes orb-spin { to { transform: rotate(360deg); } }`}</style>
 
-	const handleEndCallClick = useCallback(() => {
-		discardRecording();
-		stopPlayback();
-		release();
-		setIsCallActive(false);
-		setCallEndPending(false);
-		resetBotState();
-	}, [discardRecording, stopPlayback, release, resetBotState]);
+      <header className="flex items-center justify-between px-6 py-5">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium tracking-tight text-zinc-300">Voice Agent</span>
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`}
+            title={connected ? 'Connected' : 'Disconnected'}
+          />
+        </div>
+        <button
+          onClick={() => setDebugOpen((v) => !v)}
+          className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-zinc-500 transition hover:bg-white/5 hover:text-zinc-300"
+        >
+          <SlidersHorizontal className="h-3.5 w-3.5" />
+          debug
+        </button>
+      </header>
 
-	useEffect(() => release, [release]);
+      <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-6">
+        <Orb state={state} levelRef={levelRef} />
 
-	const isProcessing = botState === "processing";
-	const isSpeaking = botState === "speaking" || botState === "greeting";
-	const isListening = botState === "listening";
-	const callEnded = botState === "call_ended";
+        <div className="h-6 text-center">
+          <p className="text-sm text-zinc-400">{substatus ?? CAPTION[state]}</p>
+        </div>
 
-	return (
-		<div className="h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-6">
-			<div className="mb-6 flex justify-between items-center">
-				<div>
-					<h1 className="text-3xl font-bold mb-2">Wise Voice Agent</h1>
-					<p className="text-muted-foreground">
-						Streaming call simulation with barge-in
-					</p>
-				</div>
+        <div className="min-h-0 w-full flex-1 overflow-hidden">
+          <Transcript messages={messages} />
+        </div>
+      </main>
 
-				<div className="flex items-center gap-4 text-xs text-muted-foreground">
-					<span>Pipeline</span>
-					<span>{`>`}</span>
-					<span>Groq Whisper</span>
-					<span>•</span>
-					<span>Streaming LLM</span>
-					<span>•</span>
-					<span>Piper TTS</span>
-				</div>
-			</div>
+      <footer className="flex items-center justify-center gap-3 px-6 py-8">
+        {!isCallActive ? (
+          <button
+            onClick={handleStart}
+            disabled={!connected}
+            className="flex items-center gap-2.5 rounded-full bg-white px-7 py-3.5 text-sm font-medium text-zinc-900 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
+          >
+            <Mic className="h-4 w-4" />
+            Start talking
+          </button>
+        ) : (
+          <button
+            onClick={handleEnd}
+            className="flex items-center gap-2.5 rounded-full bg-red-500/90 px-7 py-3.5 text-sm font-medium text-white transition hover:bg-red-500"
+          >
+            <PhoneOff className="h-4 w-4" />
+            End
+          </button>
+        )}
+      </footer>
 
-			<div className="grid grid-cols-2 gap-6 h-[calc(100vh-140px)]">
-				<div className="flex flex-col gap-4">
-					<Card className="shadow-lg">
-						<CardHeader>
-							<CardTitle className="text-lg">
-								<div className="flex justify-between">
-									Call Controls
-									<div className="flex items-center justify-center gap-2">
-										<div
-											className={`h-2.5 w-2.5 rounded-full ${
-												connected ? "bg-green-500 animate-pulse" : "bg-red-500"
-											}`}
-										/>
-										<span className="text-sm font-medium text-muted-foreground">
-											{connected ? "Connected" : "Disconnected"}
-										</span>
-									</div>
-								</div>
-							</CardTitle>
-						</CardHeader>
-						<CardContent className="space-y-4">
-							{isCallActive && (
-								<div className="text-xs text-gray-500 border border-gray-200 rounded p-2 bg-gray-50">
-									<span className="font-mono">
-										Bot State: <strong>{botState}</strong>
-									</span>
-								</div>
-							)}
-
-							{metrics && (
-								<div className="flex items-center gap-3 rounded-lg border-2 border-purple-200 bg-purple-50 p-3">
-									<Zap className="h-4 w-4 text-purple-600" />
-									<div className="flex flex-col text-xs text-purple-800">
-										<span className="font-semibold">
-											First audio in {metrics.firstAudioMs ?? "—"} ms
-										</span>
-										<span className="text-purple-600">
-											first token {metrics.firstTokenMs ?? "—"} ms · full
-											response {metrics.totalMs} ms · {metrics.chunks} chunks
-										</span>
-									</div>
-								</div>
-							)}
-
-							{isSpeaking && isCallActive && (
-								<div className="flex items-center justify-center gap-3 bg-blue-50 p-4 rounded-lg border-2 border-blue-200">
-									<Loader2 className="h-4 w-4 animate-spin text-blue-600" />
-									<div className="flex flex-col">
-										<span className="text-blue-700 font-semibold">
-											Bot is speaking...
-										</span>
-										<span className="text-blue-600 text-xs">
-											Just start talking to interrupt
-										</span>
-									</div>
-								</div>
-							)}
-
-							{isListening && !isRecording && isCallActive && (
-								<div className="flex items-center justify-center gap-3 bg-green-50 p-4 rounded-lg border-2 border-green-200">
-									<div className="h-3 w-3 rounded-full bg-green-500 animate-pulse" />
-									<span className="text-green-700 font-semibold">
-										Bot is listening...
-									</span>
-								</div>
-							)}
-
-							{isRecording && (
-								<div className="flex items-center justify-center gap-3 bg-red-50 p-4 rounded-lg border-2 border-red-200">
-									<div className="h-3 w-3 rounded-full bg-red-500 animate-pulse" />
-									<div className="flex flex-col">
-										<span className="text-red-700 font-semibold">
-											Recording...
-										</span>
-										<span className="text-red-600 text-xs">
-											Auto-stops after 2s of silence
-										</span>
-									</div>
-								</div>
-							)}
-
-							{didBargeIn && (
-								<div className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
-									Barge-in detected — previous response cancelled mid-sentence.
-								</div>
-							)}
-
-							{processingSubstatus && (
-								<div className="flex items-center gap-3 bg-blue-50 p-3 rounded-lg border-2 border-blue-200">
-									<Loader2 className="h-4 w-4 animate-spin text-blue-600" />
-									<span className="text-blue-700 font-medium text-sm">
-										{processingSubstatus}
-									</span>
-								</div>
-							)}
-
-							{!isCallActive ? (
-								<Button
-									onClick={handleStartCall}
-									disabled={!connected || isProcessing || callEnded}
-									size="lg"
-									className="w-full h-16 text-lg"
-								>
-									<Phone className="mr-2 h-6 w-6" />
-									Start Call
-								</Button>
-							) : (
-								<Button
-									onClick={handleEndCallClick}
-									variant="destructive"
-									size="lg"
-									className="w-full h-16 text-lg"
-									disabled={callEnded}
-								>
-									<PhoneOff className="mr-2 h-6 w-6" />
-									End Call
-								</Button>
-							)}
-
-							{callEnded && (
-								<div className="bg-orange-50 border border-orange-200 p-4 rounded-lg">
-									<p className="text-sm text-orange-900 font-medium">
-										Call ended - Refresh page to start a new call
-									</p>
-								</div>
-							)}
-						</CardContent>
-					</Card>
-
-					<Card className="shadow-lg flex-1">
-						<CardHeader>
-							<CardTitle className="text-lg">How It Works</CardTitle>
-						</CardHeader>
-						<CardContent className="flex gap-4">
-							<div className="space-y-2">
-								<p className="text-sm font-medium">Call Simulation:</p>
-								<ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground">
-									<li>Click "Start Call"</li>
-									<li>Bot greets you automatically</li>
-									<li>Speak whenever you like</li>
-									<li>Talk over the bot to interrupt it</li>
-									<li>Pauses auto-detected (2s silence)</li>
-									<li>Bot answers or transfers to human</li>
-								</ol>
-							</div>
-							<div className="p-4 bg-blue-50 rounded-lg flex-1">
-								<p className="text-xs font-medium text-blue-900 mb-2">
-									Example Questions:
-								</p>
-								<div className="space-y-1 text-xs text-blue-700">
-									<p>✓ "Where is my money?"</p>
-									<p>✓ "When will my transfer arrive?"</p>
-									<p>✓ "Why is my transfer delayed?"</p>
-									<p className="mt-2 pt-2 border-t border-blue-200">
-										✗ "What are your fees?" → Transfers to human
-									</p>
-								</div>
-							</div>
-						</CardContent>
-					</Card>
-				</div>
-
-				<Card className="flex flex-col shadow-lg">
-					<CardHeader className="border-b pb-4">
-						<CardTitle className="text-lg">Call Transcript</CardTitle>
-						<CardDescription className="text-xs">
-							Streams in as the agent generates it
-						</CardDescription>
-					</CardHeader>
-					<CardContent className="flex-1 p-0 overflow-hidden">
-						<ConversationDisplay messages={messages} />
-					</CardContent>
-				</Card>
-			</div>
-		</div>
-	);
+      <DebugPanel
+        open={debugOpen}
+        onClose={() => setDebugOpen(false)}
+        connected={connected}
+        metrics={metrics}
+      />
+    </div>
+  );
 };
 
 export default VoiceAgent;

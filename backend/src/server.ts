@@ -3,7 +3,6 @@ import { createServer } from 'http';
 import { Server, type Socket } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -12,7 +11,9 @@ import * as whisperService from './services/whisperService.js';
 import * as tts from './services/ttsService.js';
 import * as llm from './services/llmService.js';
 import { SentenceChunker } from './services/sentenceChunker.js';
-import type { Message } from './models/types.js';
+import { classifyUtterance } from './services/backchannel.js';
+import { Conversation } from './services/conversation.js';
+import type { CallState, TurnMetrics } from './models/types.js';
 
 dotenv.config();
 
@@ -27,92 +28,20 @@ const httpServer = createServer(app);
 const PORT = process.env.PORT || 3000;
 
 app.use(
-  cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
-    credentials: true,
-  })
+  cors({ origin: process.env.CLIENT_URL || 'http://localhost:5173', credentials: true })
 );
 app.use(express.json());
-
-const upload = multer({ dest: 'uploads/', limits: { fileSize: 10 * 1024 * 1024 } });
-app.use('/audio', express.static('uploads'));
 
 app.get('/health', (_, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     llmProvider: llm.activeProvider(),
-    services: {
-      ollama: process.env.OLLAMA_HOST || 'http://localhost:11434',
-      groq: hasGroqKey() ? 'configured' : 'missing (set GROQ_API_KEY)',
-      tts: tts.activeTtsProvider(),
-    },
+    ttsProvider: tts.activeTtsProvider(),
+    groqKey: hasGroqKey() ? 'configured' : 'missing (set GROQ_API_KEY)',
   });
 });
 
-/** Collect a full (non-streamed) response — used by the REST test endpoints. */
-async function generateComplete(query: string, history: Message[] = []) {
-  const controller = new AbortController();
-  let text = '';
-  for await (const token of llm.streamResponse(query, history, controller.signal)) {
-    text += token;
-  }
-  text = text.trim();
-  return { text, shouldDeflect: llm.isDeflection(text) };
-}
-
-app.post('/api/test-query', async (req, res) => {
-  try {
-    const { query } = req.body;
-    if (!query) return res.status(400).json({ error: 'No query provided' });
-
-    const response = await generateComplete(query);
-    res.json({ success: true, query, result: { response } });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Failed to process query',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
-});
-
-app.post('/api/process-audio', upload.single('audio'), async (req, res) => {
-  let convertedPath: string | null = null;
-  try {
-    if (!req.file) return res.status(400).json({ error: 'No audio file provided' });
-
-    convertedPath = await audioProcessor.convertToWav(req.file.path);
-    const transcription = await whisperService.transcribeAudioToText(convertedPath);
-
-    if (!transcription.text?.trim()) throw new Error('No speech detected in audio');
-
-    const response = await generateComplete(transcription.text);
-    const audio = await tts.synthesizeSpeechFromText(response.text);
-    const audioOutputPath = path.join('uploads', `response_${Date.now()}.wav`);
-    await fs.promises.writeFile(audioOutputPath, audio);
-
-    await audioProcessor.cleanupAudioFile(req.file.path);
-    await audioProcessor.cleanupAudioFile(convertedPath);
-
-    res.json({
-      success: true,
-      result: {
-        transcription: { text: transcription.text },
-        response: { ...response, audioPath: `/audio/${path.basename(audioOutputPath)}` },
-      },
-    });
-  } catch (error) {
-    if (req.file?.path) await audioProcessor.cleanupAudioFile(req.file.path);
-    if (convertedPath) await audioProcessor.cleanupAudioFile(convertedPath);
-    res.status(500).json({
-      error: 'Failed to process audio',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Realtime pipeline
 // ---------------------------------------------------------------------------
 
 const io = new Server(httpServer, {
@@ -124,43 +53,76 @@ const io = new Server(httpServer, {
   maxHttpBufferSize: 10 * 1024 * 1024,
 });
 
-const GREETING =
-  'Hello! Thank you for calling Wise customer support. How can I help you with your money transfer today?';
+const GREETING = process.env.AGENT_GREETING || "Hey, I'm listening. What can I help you with?";
+const STT_TIMEOUT_MS = 20_000;
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
-/** Mutable state for one connected caller. */
-interface CallSession {
-  history: Message[];
+/** Reject if a stage hangs, so one bad call cannot wedge the conversation. */
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+interface Session {
+  conversation: Conversation;
   turnId: number;
   controller: AbortController | null;
+  state: CallState;
+  /** Generated text for the turn currently being spoken, pending commit. */
+  pendingText: string | null;
+  pendingTurnId: number | null;
+  /** Chunks the client had finished playing when it paused for a barge-in. */
+  bargeChunksPlayed: number;
+  /** Set when the caller asked the agent to carry on. */
+  resumeHint: string | null;
 }
 
 io.on('connection', (socket: Socket) => {
   console.log(`🔌 Client connected: ${socket.id}`);
 
-  const session: CallSession = { history: [], turnId: 0, controller: null };
+  const session: Session = {
+    conversation: new Conversation(),
+    turnId: 0,
+    controller: null,
+    state: 'idle',
+    pendingText: null,
+    pendingTurnId: null,
+    bargeChunksPlayed: 0,
+    resumeHint: null,
+  };
 
-  /** Cancel whatever the agent is currently doing. */
-  const cancelActiveTurn = (reason: string) => {
-    if (!session.controller) return false;
-    console.log(`✋ Cancelling turn ${session.turnId} (${reason})`);
+  const setState = (state: CallState) => {
+    if (session.state === state) return;
+    session.state = state;
+    socket.emit('state', { state });
+  };
+
+  const abortActiveTurn = (reason: string) => {
+    if (!session.controller) return;
+    console.log(`✋ Aborting turn ${session.turnId} (${reason})`);
     session.controller.abort();
     session.controller = null;
-    return true;
   };
 
   /**
-   * Streams one assistant response: LLM tokens out as they arrive, audio
-   * synthesised and emitted per sentence so the caller hears the first
-   * sentence while the rest is still being generated.
+   * Generate and speak one response, streaming sentence by sentence so the
+   * caller hears the opening while the rest is still being written.
    */
-  const speakStreaming = async (
-    userText: string,
+  const speak = async (
+    query: string,
     turnId: number,
-    signal: AbortSignal
+    signal: AbortSignal,
+    sttMs: number | null
   ): Promise<void> => {
     const startedAt = Date.now();
     const chunker = new SentenceChunker();
@@ -169,52 +131,50 @@ io.on('connection', (socket: Socket) => {
     let firstAudioMs: number | null = null;
     let chunkIndex = 0;
 
-    const speak = async (chunk: string) => {
+    const resumeHint = session.resumeHint;
+    session.resumeHint = null;
+
+    const emitChunk = async (chunk: string) => {
       if (signal.aborted) return;
 
       const audio = await tts.synthesizeSpeechFromText(chunk, signal);
       if (signal.aborted) return;
 
-      if (firstAudioMs === null) firstAudioMs = Date.now() - startedAt;
+      if (firstAudioMs === null) {
+        firstAudioMs = Date.now() - startedAt;
+        setState('speaking');
+      }
 
-      socket.emit('response:audio:chunk', {
-        turnId,
-        index: chunkIndex++,
-        text: chunk,
-        audio,
-      });
+      session.conversation.trackChunk(turnId, chunk);
+      socket.emit('response:audio:chunk', { turnId, index: chunkIndex++, text: chunk, audio });
     };
 
-    socket.emit('processing:llm', { turnId });
+    setState('thinking');
 
-    for await (const token of llm.streamResponse(userText, session.history, signal)) {
+    for await (const token of llm.streamResponse(query, session.conversation.history(), signal, resumeHint)) {
       if (signal.aborted) return;
 
-      if (firstTokenMs === null) {
-        firstTokenMs = Date.now() - startedAt;
-        socket.emit('processing:tts', { turnId });
-      }
+      if (firstTokenMs === null) firstTokenMs = Date.now() - startedAt;
 
       fullText += token;
       socket.emit('response:text:delta', { turnId, token });
 
-      for (const chunk of chunker.push(token)) {
-        await speak(chunk);
-      }
+      for (const chunk of chunker.push(token)) await emitChunk(chunk);
     }
 
-    for (const chunk of chunker.flush()) {
-      await speak(chunk);
-    }
-
+    for (const chunk of chunker.flush()) await emitChunk(chunk);
     if (signal.aborted) return;
 
     const text = fullText.trim();
-    const shouldDeflect = llm.isDeflection(text);
 
-    session.history.push({ role: 'assistant', content: text, timestamp: new Date() });
+    // The turn is NOT committed to history here. The caller may still interrupt
+    // audio that is queued but unplayed, and history must record only what was
+    // actually heard. Commit happens on playback:complete or on interrupt.
+    session.pendingText = text;
+    session.pendingTurnId = turnId;
 
-    const metrics = {
+    const metrics: TurnMetrics = {
+      sttMs,
       firstTokenMs,
       firstAudioMs,
       totalMs: Date.now() - startedAt,
@@ -222,136 +182,205 @@ io.on('connection', (socket: Socket) => {
     };
 
     console.log(
-      `📊 turn ${turnId}: first token ${firstTokenMs}ms · first audio ${firstAudioMs}ms · ` +
-        `total ${metrics.totalMs}ms · ${chunkIndex} chunks`
+      `📊 turn ${turnId}: stt ${sttMs}ms · first token ${firstTokenMs}ms · ` +
+        `first audio ${firstAudioMs}ms · total ${metrics.totalMs}ms · ${chunkIndex} chunks`
     );
 
-    socket.emit('response:done', { turnId, text, shouldDeflect, metrics });
+    socket.emit('response:done', { turnId, text, metrics });
+  };
 
-    if (shouldDeflect) {
-      socket.emit('call:end', {
-        reason: 'deflection',
-        message: 'Connecting you with a human agent...',
-      });
+  /** Transcribe a recorded blob. Returns null if nothing usable was heard. */
+  const transcribe = async (audio: ArrayBuffer): Promise<{ text: string; ms: number } | null> => {
+    const tempPath = path.join(
+      'uploads',
+      `input_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.webm`
+    );
+    let convertedPath: string | null = null;
+    const startedAt = Date.now();
+
+    try {
+      await fs.promises.mkdir('uploads', { recursive: true });
+      await fs.promises.writeFile(tempPath, Buffer.from(audio));
+      convertedPath = await audioProcessor.convertToWav(tempPath);
+
+      const result = await withTimeout(
+        whisperService.transcribeAudioToText(convertedPath),
+        STT_TIMEOUT_MS,
+        'Transcription'
+      );
+
+      const text = result.text?.trim();
+      return text ? { text, ms: Date.now() - startedAt } : null;
+    } finally {
+      await audioProcessor.cleanupAudioFile(tempPath);
+      if (convertedPath) await audioProcessor.cleanupAudioFile(convertedPath);
     }
   };
 
-  socket.on('call:start', async () => {
-    console.log(`📞 Call started: ${socket.id}`);
-    session.history = [];
+  /** Run a caller utterance through generation, as a fresh turn. */
+  const handleUtterance = async (text: string, sttMs: number | null) => {
+    abortActiveTurn('new caller turn');
+
     session.turnId += 1;
     const turnId = session.turnId;
+    const controller = new AbortController();
+    session.controller = controller;
 
+    session.conversation.addUserTurn(text);
+
+    try {
+      await speak(text, turnId, controller.signal, sttMs);
+    } catch (error) {
+      if (isAbort(error)) return;
+      console.error('❌ Turn failed:', error);
+      socket.emit('error', {
+        message: error instanceof Error ? error.message : 'Something went wrong',
+      });
+      setState('listening');
+      socket.emit('ready:listening', { turnId });
+    } finally {
+      if (session.controller === controller) session.controller = null;
+    }
+  };
+
+  // -- events ---------------------------------------------------------------
+
+  socket.on('call:start', async () => {
+    console.log(`📞 Call started: ${socket.id}`);
+    session.conversation.reset();
+    session.turnId += 1;
+    session.resumeHint = null;
+
+    const turnId = session.turnId;
     const controller = new AbortController();
     session.controller = controller;
 
     try {
-      session.history.push({ role: 'assistant', content: GREETING, timestamp: new Date() });
-
+      setState('thinking');
       socket.emit('response:text:delta', { turnId, token: GREETING });
 
       const audio = await tts.synthesizeSpeechFromText(GREETING, controller.signal);
       if (controller.signal.aborted) return;
 
+      session.conversation.trackChunk(turnId, GREETING);
+      setState('speaking');
       socket.emit('response:audio:chunk', { turnId, index: 0, text: GREETING, audio });
-      socket.emit('response:done', {
-        turnId,
-        text: GREETING,
-        shouldDeflect: false,
-        isGreeting: true,
-        metrics: null,
-      });
+
+      session.pendingText = GREETING;
+      session.pendingTurnId = turnId;
+      socket.emit('response:done', { turnId, text: GREETING, metrics: null });
     } catch (error) {
       if (!isAbort(error)) {
         console.error('❌ Greeting failed:', error);
-        socket.emit('error', { message: 'Failed to send greeting' });
+        socket.emit('error', { message: 'Could not start the call' });
       }
     } finally {
       if (session.controller === controller) session.controller = null;
     }
   });
 
-  socket.on('audio:input', async (data: { audio: ArrayBuffer }) => {
-    // A new utterance supersedes anything still in flight.
-    cancelActiveTurn('new user audio');
+  /**
+   * The caller started talking over the agent. The client has paused playback
+   * and is recording. Nothing is cancelled yet — it may only be a backchannel,
+   * and stopping for every "mhm" makes the agent unusable.
+   */
+  socket.on('barge:detected', (data: { turnId: number; chunksPlayed: number }) => {
+    if (data?.turnId !== session.pendingTurnId && data?.turnId !== session.turnId) return;
+    session.bargeChunksPlayed = data.chunksPlayed ?? 0;
+    setState('paused');
+    console.log(`⏸  Barge detected on turn ${data.turnId} after ${session.bargeChunksPlayed} chunks`);
+  });
 
-    session.turnId += 1;
-    const turnId = session.turnId;
-    const controller = new AbortController();
-    session.controller = controller;
+  socket.on(
+    'audio:input',
+    async (data: { audio: ArrayBuffer; duringPlayback?: boolean; spokenChunks?: number }) => {
+      try {
+        if (!data?.audio) return;
 
-    const tempInputPath = path.join(
-      'uploads',
-      `input_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.webm`
-    );
-    let convertedPath: string | null = null;
+        if (!data.duringPlayback) {
+          setState('thinking');
+          const result = await transcribe(data.audio);
+          if (!result) {
+            setState('listening');
+            socket.emit('ready:listening', { turnId: session.turnId });
+            return;
+          }
+          socket.emit('transcription:complete', { text: result.text });
+          await handleUtterance(result.text, result.ms);
+          return;
+        }
 
-    try {
-      socket.emit('processing:start', { turnId });
-      await fs.promises.writeFile(tempInputPath, Buffer.from(data.audio));
+        // --- spoken over the agent: backchannel or real interruption? -------
+        const spokenChunks = data.spokenChunks ?? session.bargeChunksPlayed;
+        const interruptedTurnId = session.pendingTurnId ?? session.turnId;
 
-      convertedPath = await audioProcessor.convertToWav(tempInputPath);
-      if (controller.signal.aborted) return;
+        const result = await transcribe(data.audio);
+        const classification = classifyUtterance(result?.text ?? '');
 
-      socket.emit('processing:stt', { turnId });
-      const transcription = await whisperService.transcribeAudioToText(convertedPath);
-      if (controller.signal.aborted) return;
+        console.log(
+          `🔎 Over-speech classified as ${classification.kind}: "${classification.normalised}"`
+        );
 
-      if (!transcription.text?.trim()) {
-        socket.emit('error', { message: 'No speech detected' });
-        socket.emit('ready:listening', { turnId });
-        return;
-      }
+        if (classification.kind === 'backchannel') {
+          // Not an interruption — pick up exactly where playback paused.
+          socket.emit('playback:resume', { turnId: interruptedTurnId });
+          setState('speaking');
+          return;
+        }
 
-      session.history.push({
-        role: 'user',
-        content: transcription.text,
-        timestamp: new Date(),
-      });
-      socket.emit('transcription:complete', { turnId, text: transcription.text });
+        // A genuine interruption. Stop generating, and record only what the
+        // caller actually heard.
+        abortActiveTurn('confirmed interruption');
+        const spoken = session.conversation.commitInterrupted(interruptedTurnId, spokenChunks);
+        session.pendingText = null;
+        session.pendingTurnId = null;
 
-      await speakStreaming(transcription.text, turnId, controller.signal);
-    } catch (error) {
-      if (isAbort(error)) {
-        console.log(`✋ Turn ${turnId} aborted`);
-      } else {
-        console.error('❌ Turn failed:', error);
+        socket.emit('turn:interrupted', { turnId: interruptedTurnId, spokenText: spoken });
+
+        if (classification.kind === 'resume') {
+          session.resumeHint = session.conversation.lastUnspoken();
+        }
+
+        await handleUtterance(result!.text, result!.ms);
+      } catch (error) {
+        console.error('❌ audio:input failed:', error);
         socket.emit('error', {
-          message: error instanceof Error ? error.message : 'Processing failed',
+          message: error instanceof Error ? error.message : 'Could not process audio',
         });
-        socket.emit('ready:listening', { turnId });
+        setState('listening');
+        socket.emit('ready:listening', { turnId: session.turnId });
       }
-    } finally {
-      if (session.controller === controller) session.controller = null;
-      await audioProcessor.cleanupAudioFile(tempInputPath);
-      if (convertedPath) await audioProcessor.cleanupAudioFile(convertedPath);
     }
-  });
+  );
 
-  /**
-   * Barge-in: the caller started speaking over the agent. Stop generating and
-   * stop synthesising immediately, and tell the client to drop queued audio.
-   */
-  socket.on('interrupt', () => {
-    const cancelled = cancelActiveTurn('barge-in');
-    socket.emit('turn:cancelled', { turnId: session.turnId, cancelled });
-  });
-
-  /**
-   * The client has finished playing every queued chunk for this turn. This
-   * replaces the old character-count timer, which guessed at playback length.
-   */
+  /** Every chunk for a turn has finished playing — the turn is now history. */
   socket.on('playback:complete', (data: { turnId: number }) => {
-    if (data?.turnId !== session.turnId) return; // stale turn, ignore
-    socket.emit('ready:listening', { turnId: session.turnId });
+    if (data?.turnId !== session.pendingTurnId) return;
+
+    if (session.pendingText) {
+      session.conversation.commitComplete(data.turnId, session.pendingText);
+    }
+    session.pendingText = null;
+    session.pendingTurnId = null;
+
+    setState('listening');
+    socket.emit('ready:listening', { turnId: data.turnId });
+  });
+
+  socket.on('call:end', () => {
+    abortActiveTurn('caller ended the call');
+    session.conversation.reset();
+    setState('ended');
   });
 
   socket.on('disconnect', () => {
-    cancelActiveTurn('client disconnected');
+    abortActiveTurn('client disconnected');
     console.log(`🔌 Client disconnected: ${socket.id}`);
   });
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`🚀 Server on :${PORT} — LLM provider: ${llm.activeProvider()}`);
+  console.log(
+    `🚀 Server on :${PORT} — LLM ${llm.activeProvider()} · TTS ${tts.activeTtsProvider()}`
+  );
 });

@@ -1,95 +1,63 @@
 import { create } from 'zustand';
 
 /**
- * Bot State Machine:
+ * Call state, mirrored from the server so both sides agree.
  *
- * idle -> call_starting -> greeting -> listening -> recording -> processing -> speaking -> listening
- *
- * State Transitions:
- * - idle: Initial state, no call active
- * - call_starting: User clicked start call, waiting for greeting
- * - greeting: Bot is playing the initial greeting message
- * - listening: Bot is ready to listen, waiting for user to speak (auto-starts recording)
- * - recording: User is speaking, audio is being recorded
- * - processing: Audio sent to server, being transcribed and processed (STT -> LLM -> TTS)
- * - speaking: Bot response audio is playing
- * - call_ended: Call has ended (deflection or user hang up)
+ *   idle      no call
+ *   listening waiting for / capturing the caller
+ *   thinking  transcribing or generating
+ *   speaking  playing audio back
+ *   paused    caller spoke over us; deciding if it was a real interruption
+ *   ended     call finished
  */
-export type BotState =
-  | 'idle'
-  | 'call_starting'
-  | 'greeting'
-  | 'listening'
-  | 'recording'
-  | 'processing'
-  | 'speaking'
-  | 'call_ended';
+export type CallState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'paused' | 'ended';
+
+export interface DebugEvent {
+  id: string;
+  at: number;
+  label: string;
+  detail?: string;
+}
 
 interface BotStateStore {
-  state: BotState;
+  state: CallState;
+  substatus: string | null;
+  events: DebugEvent[];
 
-  // For UI Feedback
-  processingSubstatus: string | null;
-
-  setState: (newState: BotState, reason?: string) => void;
-  setProcessingSubstatus: (substatus: string | null) => void;
-
-  canRecord: () => boolean;
-  canProcessAudio: () => boolean;
-  isPlayingAudio: () => boolean;
-
+  setState: (next: CallState, reason?: string) => void;
+  setSubstatus: (substatus: string | null) => void;
+  logEvent: (label: string, detail?: string) => void;
   reset: () => void;
 }
 
-const logStateChange = (from: BotState, to: BotState, reason?: string) => {
-  const timestamp = new Date().toISOString();
-  const reasonStr = reason ? ` (Reason: ${reason})` : '';
-  console.log(`[BOT_STATE ${timestamp}] ${from} -> ${to}${reasonStr}`);
-};
-
 export const useBotStateStore = create<BotStateStore>((set, get) => ({
   state: 'idle',
-  processingSubstatus: null,
+  substatus: null,
+  events: [],
 
-  setState: (newState: BotState, reason?: string) => {
-    const currentState = get().state;
-    if (currentState !== newState) {
-      logStateChange(currentState, newState, reason);
-      set({ state: newState });
-    }
+  setState: (next, reason) => {
+    const current = get().state;
+    if (current === next) return;
+    console.log(`[STATE] ${current} -> ${next}${reason ? ` (${reason})` : ''}`);
+    set({ state: next });
+    get().logEvent(`${current} → ${next}`, reason);
   },
 
-  setProcessingSubstatus: (substatus: string | null) => {
-    const timestamp = new Date().toISOString();
-    if (substatus) {
-      console.log(`[BOT_PROCESSING ${timestamp}] ${substatus}`);
-    }
-    set({ processingSubstatus: substatus });
-  },
+  setSubstatus: (substatus) => set({ substatus }),
 
-  // Can only record when bot is in listening state
-  canRecord: () => {
-    const state = get().state;
-    return state === 'listening';
-  },
+  logEvent: (label, detail) =>
+    set((s) => ({
+      events: [
+        ...s.events.slice(-40),
+        { id: `${Date.now()}-${Math.random()}`, at: Date.now(), label, detail },
+      ],
+    })),
 
-  // Can only process audio when in recording state (user just finished speaking)
-  canProcessAudio: () => {
-    const state = get().state;
-    return state === 'recording';
-  },
-
-  // Check if bot is currently playing audio (greeting or speaking)
-  isPlayingAudio: () => {
-    const state = get().state;
-    return state === 'greeting' || state === 'speaking';
-  },
-
-  reset: () => {
-    console.log('[BOT_STATE] Resetting to idle state');
-    set({
-      state: 'idle',
-      processingSubstatus: null,
-    });
-  },
+  reset: () => set({ state: 'idle', substatus: null, events: [] }),
 }));
+
+// Dev affordance: drive call state from the console to check visuals without
+// a live call, e.g. __botStore.getState().setState('speaking')
+if (import.meta.env.DEV) {
+  (window as unknown as Record<string, unknown>).__botStore = useBotStateStore;
+}

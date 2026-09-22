@@ -33,6 +33,8 @@ export const useVoiceActivityDetection = (
   const speechSinceRef = useRef<number | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const speechFiredRef = useRef(false);
+  /** Live mic level, 0..1. Read from an animation loop; never triggers renders. */
+  const levelRef = useRef(0);
 
   const {
     onSpeechEnd,
@@ -57,6 +59,7 @@ export const useVoiceActivityDetection = (
     const data = new Uint8Array(analyserRef.current.frequencyBinCount);
     analyserRef.current.getByteFrequencyData(data);
     const average = data.reduce((sum, v) => sum + v, 0) / data.length;
+    levelRef.current = Math.min(1, average / 90);
 
     // --- sustained speech (barge-in) ---
     if (average >= speechThreshold) {
@@ -110,7 +113,10 @@ export const useVoiceActivityDetection = (
       silenceTimerRef.current = null;
       animationFrameRef.current = null;
       analyserRef.current = null;
+      levelRef.current = 0;
       if (audioContext.state !== 'closed') audioContext.close();
     };
   }, [audioStream, enabled, check]);
+
+  return { levelRef };
 };

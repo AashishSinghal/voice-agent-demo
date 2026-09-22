@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type { Socket } from 'socket.io-client';
 import { io } from 'socket.io-client';
-import { useBotStateStore } from '../stores/useBotStateStore';
+import { useBotStateStore, type CallState } from '../stores/useBotStateStore';
 
 export interface ConversationMessage {
   id: string;
   type: 'user' | 'assistant' | 'system';
   text?: string;
   timestamp: Date;
-  status?: 'transcribing' | 'streaming' | 'complete' | 'error' | 'interrupted';
+  status?: 'streaming' | 'complete' | 'error' | 'interrupted';
   turnId?: number;
 }
 
 export interface TurnMetrics {
+  sttMs: number | null;
   firstTokenMs: number | null;
   firstAudioMs: number | null;
   totalMs: number;
@@ -22,54 +23,50 @@ export interface TurnMetrics {
 export interface AudioChunk {
   turnId: number;
   index: number;
+  text: string;
   audio: ArrayBuffer;
 }
 
-interface UseSocketConnectionOptions {
+interface Handlers {
   onAudioChunk: (chunk: AudioChunk) => void;
   onTurnComplete: (turnId: number) => void;
-  onCancelled: () => void;
+  /** Over-speech was only a backchannel — carry on from the pause point. */
+  onResumePlayback: () => void;
+  /** Over-speech was a real interruption — drop queued audio. */
+  onInterrupted: (spokenText: string) => void;
   onReadyToListen: () => void;
-  onCallEnd?: () => void;
 }
 
-export const useSocketConnection = (
-  serverUrl: string,
-  options: UseSocketConnectionOptions
-) => {
+export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
   const socketRef = useRef<Socket | null>(null);
   const [connected, setConnected] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [metrics, setMetrics] = useState<TurnMetrics | null>(null);
 
-  const { setState, setProcessingSubstatus } = useBotStateStore();
+  const { setState, setSubstatus, logEvent } = useBotStateStore();
 
-  // Held in a ref so re-renders never rebuild the socket.
-  const handlersRef = useRef(options);
-  handlersRef.current = options;
+  const handlersRef = useRef(handlers);
+  handlersRef.current = handlers;
 
   const addMessage = useCallback((message: Omit<ConversationMessage, 'id' | 'timestamp'>) => {
     setMessages((prev) => [
       ...prev,
-      { ...message, id: `msg-${Date.now()}-${Math.random()}`, timestamp: new Date() },
+      { ...message, id: `m-${Date.now()}-${Math.random()}`, timestamp: new Date() },
     ]);
   }, []);
 
-  /** Append a streamed token to the in-progress assistant message. */
   const appendDelta = useCallback((turnId: number, token: string) => {
     setMessages((prev) => {
       const last = prev[prev.length - 1];
-
-      if (last && last.type === 'assistant' && last.turnId === turnId && last.status === 'streaming') {
+      if (last?.type === 'assistant' && last.turnId === turnId && last.status === 'streaming') {
         const updated = [...prev];
         updated[updated.length - 1] = { ...last, text: (last.text ?? '') + token };
         return updated;
       }
-
       return [
         ...prev,
         {
-          id: `msg-${Date.now()}-${Math.random()}`,
+          id: `m-${Date.now()}-${Math.random()}`,
           type: 'assistant' as const,
           text: token,
           timestamp: new Date(),
@@ -80,13 +77,13 @@ export const useSocketConnection = (
     });
   }, []);
 
-  const finaliseMessage = useCallback(
+  const finalise = useCallback(
     (turnId: number, status: ConversationMessage['status'], text?: string) => {
       setMessages((prev) => {
         const updated = [...prev];
         for (let i = updated.length - 1; i >= 0; i--) {
           if (updated[i].type === 'assistant' && updated[i].turnId === turnId) {
-            updated[i] = { ...updated[i], status, ...(text ? { text } : {}) };
+            updated[i] = { ...updated[i], status, ...(text !== undefined ? { text } : {}) };
             break;
           }
         }
@@ -101,7 +98,6 @@ export const useSocketConnection = (
       transports: ['websocket'],
       reconnection: true,
       reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
       reconnectionAttempts: 5,
     });
     socketRef.current = socket;
@@ -109,70 +105,73 @@ export const useSocketConnection = (
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
 
-    socket.on('processing:start', () => {
-      setState('processing', 'Server started processing');
-      setProcessingSubstatus('Processing audio...');
+    // The server is the source of truth for call state.
+    socket.on('state', (data: { state: CallState }) => {
+      setState(data.state, 'server');
+      setSubstatus(
+        data.state === 'thinking' ? 'thinking…' : data.state === 'paused' ? 'checking…' : null
+      );
     });
-    socket.on('processing:stt', () => setProcessingSubstatus('Transcribing speech...'));
-    socket.on('processing:llm', () => setProcessingSubstatus('Generating response...'));
-    socket.on('processing:tts', () => setProcessingSubstatus('Synthesizing speech...'));
 
     socket.on('transcription:complete', (data: { text: string }) => {
       addMessage({ type: 'user', text: data.text, status: 'complete' });
     });
 
-    socket.on('response:text:delta', (data: { turnId: number; token: string }) => {
-      appendDelta(data.turnId, data.token);
-    });
+    socket.on('response:text:delta', (d: { turnId: number; token: string }) =>
+      appendDelta(d.turnId, d.token)
+    );
 
-    socket.on('response:audio:chunk', (data: AudioChunk) => {
-      setProcessingSubstatus(null);
-      setState('speaking', 'Audio chunk received');
-      handlersRef.current.onAudioChunk(data);
+    socket.on('response:audio:chunk', (chunk: AudioChunk) => {
+      setSubstatus(null);
+      handlersRef.current.onAudioChunk(chunk);
     });
 
     socket.on(
       'response:done',
-      (data: { turnId: number; text: string; metrics: TurnMetrics | null }) => {
-        finaliseMessage(data.turnId, 'complete', data.text);
-        if (data.metrics) setMetrics(data.metrics);
-        handlersRef.current.onTurnComplete(data.turnId);
+      (d: { turnId: number; text: string; metrics: TurnMetrics | null }) => {
+        finalise(d.turnId, 'complete', d.text);
+        if (d.metrics) setMetrics(d.metrics);
+        handlersRef.current.onTurnComplete(d.turnId);
       }
     );
 
-    socket.on('turn:cancelled', (data: { turnId: number }) => {
-      console.log(`[SOCKET] Turn ${data.turnId} cancelled`);
-      finaliseMessage(data.turnId, 'interrupted');
-      setProcessingSubstatus(null);
-      handlersRef.current.onCancelled();
+    socket.on('playback:resume', () => {
+      logEvent('backchannel', 'not an interruption — resuming');
+      handlersRef.current.onResumePlayback();
+    });
+
+    socket.on('turn:interrupted', (d: { turnId: number; spokenText: string }) => {
+      logEvent('interrupted', `heard: "${d.spokenText.slice(0, 40)}…"`);
+      // Show only what the caller actually heard.
+      finalise(d.turnId, 'interrupted', d.spokenText);
+      handlersRef.current.onInterrupted(d.spokenText);
     });
 
     socket.on('ready:listening', () => handlersRef.current.onReadyToListen());
 
-    socket.on('call:end', (data: { message: string }) => {
-      addMessage({ type: 'system', text: data.message, status: 'complete' });
-      handlersRef.current.onCallEnd?.();
-    });
-
-    socket.on('error', (data: { message: string }) => {
-      console.error(`[SOCKET] Error: ${data.message}`);
-      setProcessingSubstatus(null);
-      addMessage({ type: 'system', text: `Error: ${data.message}`, status: 'error' });
+    socket.on('error', (d: { message: string }) => {
+      console.error('[SOCKET]', d.message);
+      setSubstatus(null);
+      addMessage({ type: 'system', text: d.message, status: 'error' });
     });
 
     return () => {
       socket.disconnect();
     };
-  }, [serverUrl, addMessage, appendDelta, finaliseMessage, setState, setProcessingSubstatus]);
+  }, [serverUrl, addMessage, appendDelta, finalise, setState, setSubstatus, logEvent]);
 
   const sendAudio = useCallback(
-    (audioBlob: Blob) => {
+    (blob: Blob, opts: { duringPlayback: boolean; spokenChunks: number }) => {
       if (!socketRef.current?.connected) return;
-      setState('processing', 'Sending audio');
-      setProcessingSubstatus('Uploading audio...');
-      audioBlob.arrayBuffer().then((buf) => socketRef.current?.emit('audio:input', { audio: buf }));
+      blob.arrayBuffer().then((audio) =>
+        socketRef.current?.emit('audio:input', {
+          audio,
+          duringPlayback: opts.duringPlayback,
+          spokenChunks: opts.spokenChunks,
+        })
+      );
     },
-    [setState, setProcessingSubstatus]
+    []
   );
 
   const startCall = useCallback(() => {
@@ -182,12 +181,13 @@ export const useSocketConnection = (
     socketRef.current.emit('call:start');
   }, []);
 
-  /** Barge-in — tell the server to abandon the turn it is working on. */
-  const interrupt = useCallback(() => {
-    socketRef.current?.emit('interrupt');
+  const endCall = useCallback(() => socketRef.current?.emit('call:end'), []);
+
+  /** Caller began speaking over the agent; playback is paused pending triage. */
+  const notifyBarge = useCallback((turnId: number, chunksPlayed: number) => {
+    socketRef.current?.emit('barge:detected', { turnId, chunksPlayed });
   }, []);
 
-  /** Report that all audio for a turn has finished playing. */
   const notifyPlaybackComplete = useCallback((turnId: number) => {
     socketRef.current?.emit('playback:complete', { turnId });
   }, []);
@@ -198,7 +198,8 @@ export const useSocketConnection = (
     metrics,
     sendAudio,
     startCall,
-    interrupt,
+    endCall,
+    notifyBarge,
     notifyPlaybackComplete,
   };
 };

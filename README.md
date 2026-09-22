@@ -1,9 +1,11 @@
-# Voice Agent Demo
+# Voice Agent
 
-A streaming, interruptible voice agent for customer support. Speech in, speech
-out, over a WebSocket — with sentence-level streaming so the caller hears the
-first sentence while the model is still writing the rest, and barge-in so they
-can talk over the agent.
+A general-purpose, interruptible voice agent. Speech in, speech out, over a
+WebSocket.
+
+The design goal is that **the conversation holds up even when the model is
+weak**. Almost everything that makes this feel responsive lives in the
+infrastructure around the model, not in the model itself.
 
 ```
 mic ──> VAD ──> Whisper (Groq) ──> LLM (Groq or Ollama, streaming)
@@ -13,8 +15,29 @@ mic ──> VAD ──> Whisper (Groq) ──> LLM (Groq or Ollama, streaming)
                                         └─ ...
 ```
 
-Talking while the agent speaks aborts the in-flight LLM stream and kills the
-running TTS process mid-sentence.
+## What the infrastructure does
+
+**Streams by sentence.** Audio for sentence one is synthesised and playing while
+the model is still writing sentence three, so the caller hears a reply almost
+immediately rather than after the full response.
+
+**Tells a backchannel from an interruption.** Saying "mhm" or "yeah" while the
+agent talks does not stop it — playback pauses, the utterance is transcribed and
+classified, and if it was only an acknowledgement playback resumes from exactly
+where it stopped. A real question stops the agent immediately.
+
+**Keeps history honest about what was heard.** When the caller does interrupt,
+the agent has usually generated more than it managed to say. Only the sentences
+that actually finished playing go into the conversation history, flagged as
+interrupted — so the model never refers back to something the caller never
+heard. The unsaid remainder is kept separately, so "go on" can pick up where it
+left off.
+
+**Fails softly.** Per-stage timeouts mean a hung transcription cannot wedge the
+call; the turn is abandoned and the agent goes back to listening.
+
+None of this requires a capable model. Swap in a small local one and the
+conversation still behaves.
 
 ## Running locally
 
@@ -62,12 +85,13 @@ The browser will only grant the mic on `localhost` or over HTTPS.
 
 ### 4. Try it
 
-- *"Where is my money?"* — answered from the FAQ knowledge base
-- *"What are your fees?"* — out of scope, transfers to a human
-- **Start talking while the agent is speaking** — it stops mid-sentence
+- Ask it anything — it is a general assistant by default.
+- **Say "mhm" while it talks** — it keeps going.
+- **Ask a real question while it talks** — it stops mid-sentence.
+- **Then say "go on"** — it resumes from what it never got to say.
 
-The purple panel reports per-turn latency: time to first token, time to first
-audio, and total response time.
+Open **debug** (top right) for live call state, per-stage latency, and the
+event log showing each interruption being classified.
 
 ## Configuration
 
@@ -79,6 +103,8 @@ Everything is provider-pluggable so the same code runs locally and deployed.
 | `GROQ_MODEL` | any free chat model | `openai/gpt-oss-20b` | Groq dropped Llama from the free tier in 2026. [Current list](https://console.groq.com/docs/models). |
 | `TTS_PROVIDER` | `say`, `piper` | `piper` | `.env.example` sets `say` for local dev — see below. |
 | `SAY_VOICE` | any macOS voice | `Samantha` | `say -v '?'` lists them. |
+| `AGENT_PERSONA` | any prompt | general assistant | Repurpose the agent without touching code. |
+| `AGENT_GREETING` | any text | "Hey, I'm listening…" | First thing it says. |
 
 ### Why `say` locally and Piper in deployment
 
@@ -102,19 +128,34 @@ See [DEPLOYMENT.md](./DEPLOYMENT.md) — a $0/month setup on Render + Vercel + G
 
 ```
 backend/src/
-  server.ts                  socket pipeline, turn state, barge-in handling
-  services/llmService.ts     streaming LLM, provider-agnostic, cancellable
-  services/ttsService.ts     TTS, provider-agnostic, cancellable
+  server.ts                    socket protocol, call state, interruption triage
+  services/conversation.ts     history; truncation to what was actually heard
+  services/backchannel.ts      "mhm" vs a real interruption
   services/sentenceChunker.ts  token stream -> speakable sentences
+  services/llmService.ts       streaming LLM, provider-agnostic, cancellable
+  services/ttsService.ts       TTS, provider-agnostic, cancellable
   services/whisperService.ts   Groq Whisper STT
   services/audioProcessor.ts   ffmpeg webm -> 16 kHz mono wav
+  smoke.ts                     tests for truncation + classification
 frontend/src/
-  hooks/useMicStream.ts               one mic stream per call
-  hooks/useVoiceActivityDetection.ts  speech start (barge-in) + speech end
-  hooks/useAudioPlayback.ts           ordered chunk queue with stop()
-  hooks/useSocketConnection.ts        streaming events
-  hooks/useAudioRecorder.ts           records from the shared stream
+  components/VoiceAgent/Orb.tsx         state-coloured, level-reactive orb
+  components/VoiceAgent/DebugPanel.tsx  state, latency, event log
+  hooks/useMicStream.ts                 one mic stream per call
+  hooks/useVoiceActivityDetection.ts    speech start (barge-in) + speech end
+  hooks/useAudioPlayback.ts             queue with pause/resume/stop
+  hooks/useSocketConnection.ts          streaming protocol
+  hooks/useAudioRecorder.ts             records from the shared stream
 ```
+
+## Tests
+
+```bash
+cd backend && npm test
+```
+
+Covers the two pieces where a bug would be invisible in a demo but wrong in
+conversation: history truncation after an interruption, and backchannel
+classification.
 
 ## Requirements
 

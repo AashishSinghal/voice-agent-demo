@@ -1,82 +1,87 @@
 import axios from 'axios';
 import Groq from 'groq-sdk';
-import fs from 'fs';
-import type { Message, FAQEntry } from '../models/types.js';
+import type { Turn } from '../models/types.js';
 
 /**
- * Streaming, provider-agnostic LLM client.
+ * Streaming, provider-agnostic LLM client for a general-purpose voice agent.
  *
- * Two providers are supported so the same code runs locally and deployed:
- *   - `ollama` — local inference, no API key, good for offline development.
- *   - `groq`   — hosted inference, very low latency, free tier. Used in
- *                deployment, where running Ollama is not affordable.
+ * Providers:
+ *   - `groq`   — hosted, low latency, free tier. Default.
+ *   - `ollama` — fully local/offline.
  *
- * Select with LLM_PROVIDER. Every call takes an AbortSignal so an in-flight
- * generation can be cancelled the moment the user interrupts (barge-in).
+ * Every call takes an AbortSignal so an in-flight generation dies the instant
+ * the caller interrupts.
+ *
+ * The prompt is built to survive interruption. An assistant turn that was cut
+ * off is shown to the model as exactly what the caller heard, marked as
+ * interrupted — never the full generated text. Otherwise the model refers back
+ * to things it never actually said.
  */
-
-const faqsPath = new URL('../data/faqs.json', import.meta.url);
-const allFAQs: FAQEntry[] = JSON.parse(fs.readFileSync(faqsPath, 'utf-8'));
-
-// Keep the prompt from growing without bound over a long call.
-const MAX_HISTORY_TURNS = 8;
 
 export type LlmProvider = 'ollama' | 'groq';
 
 export function activeProvider(): LlmProvider {
-  const raw = (process.env.LLM_PROVIDER || 'ollama').toLowerCase();
-  return raw === 'groq' ? 'groq' : 'ollama';
+  const raw = (process.env.LLM_PROVIDER || 'groq').toLowerCase();
+  return raw === 'ollama' ? 'ollama' : 'groq';
 }
 
-function buildSystemPrompt(): string {
-  const faqContext = allFAQs
-    .map((faq) => `Q: ${faq.question}\nA: ${faq.answer}`)
-    .join('\n\n');
+const DEFAULT_PERSONA = `You are a helpful voice assistant. You are having a spoken conversation, so:
+- Keep answers short — two or three sentences unless asked for more.
+- Write the way people speak. No lists, no markdown, no headings, no emoji.
+- Expand numbers, symbols and abbreviations into words, since this is read aloud.
+- If you do not know something, say so plainly and briefly.`;
 
-  return `You are a friendly customer support agent for Wise, helping customers track their money transfers.
+function systemPrompt(): string {
+  const persona = process.env.AGENT_PERSONA?.trim() || DEFAULT_PERSONA;
 
-You can ONLY answer questions about the topics covered in the FAQ below. For ANY other questions, you must politely deflect to a human agent.
+  return `${persona}
 
-FAQ Knowledge Base:
-${faqContext}
-
-Guidelines:
-- Keep responses concise (2-3 sentences max)
-- Speak naturally; this text will be read aloud
-- If the question is outside the FAQ, say you are connecting them to a human agent`;
+The caller can interrupt you at any time. If a previous turn of yours is marked
+as interrupted, the caller only heard the part shown — assume they did not hear
+anything you had planned to say after it. Do not refer to it as if they had.`;
 }
 
-function buildUserPrompt(query: string, history: Message[]): string {
-  const recent = history.slice(-MAX_HISTORY_TURNS);
-  if (recent.length === 0) return `User: ${query}`;
-
-  const transcript = recent
-    .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+/** Render the conversation as a transcript the model can reason about. */
+function renderHistory(history: Turn[]): string {
+  return history
+    .map((turn) => {
+      if (turn.role === 'user') return `Caller: ${turn.content}`;
+      if (turn.interrupted) {
+        return `You (interrupted here by the caller): ${turn.content}`;
+      }
+      return `You: ${turn.content}`;
+    })
     .join('\n');
-
-  return `${transcript}\nUser: ${query}`;
 }
 
-/** True if the assistant handed the caller off to a human. */
-export function isDeflection(text: string): boolean {
-  const lower = text.toLowerCase();
-  return lower.includes('human agent') || lower.includes('outside my area');
+function buildUserPrompt(query: string, history: Turn[], resumeHint?: string | null): string {
+  const parts: string[] = [];
+
+  const transcript = renderHistory(history);
+  if (transcript) parts.push(transcript);
+
+  if (resumeHint) {
+    parts.push(
+      `(You were cut off before you could say: "${resumeHint}". The caller has ` +
+        `asked you to continue, so pick up from there naturally — do not repeat ` +
+        `what they already heard.)`
+    );
+  }
+
+  parts.push(`Caller: ${query}`);
+  return parts.join('\n');
 }
 
-/**
- * Yields response tokens as they are generated.
- * Throws `AbortError` if the signal fires mid-stream.
- */
 export async function* streamResponse(
   query: string,
-  history: Message[],
-  signal: AbortSignal
+  history: Turn[],
+  signal: AbortSignal,
+  resumeHint?: string | null
 ): AsyncGenerator<string> {
-  const provider = activeProvider();
-  const system = buildSystemPrompt();
-  const user = buildUserPrompt(query, history);
+  const system = systemPrompt();
+  const user = buildUserPrompt(query, history, resumeHint);
 
-  if (provider === 'groq') {
+  if (activeProvider() === 'groq') {
     yield* streamFromGroq(system, user, signal);
   } else {
     yield* streamFromOllama(system, user, signal);
@@ -95,8 +100,7 @@ async function* streamFromGroq(
 
   const groq = new Groq({ apiKey });
   // Groq's free tier dropped the Llama models in 2026; gpt-oss-20b is the
-  // fastest of the current free chat models, which matters for voice latency.
-  // Current list: https://console.groq.com/docs/models
+  // fastest current free chat model, which is what matters for voice latency.
   const model = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
 
   const stream = await groq.chat.completions.create(
@@ -108,7 +112,7 @@ async function* streamFromGroq(
       ],
       temperature: 0.7,
       top_p: 0.9,
-      max_tokens: 200,
+      max_tokens: 220,
       stream: true,
     },
     { signal }
@@ -138,8 +142,8 @@ async function* streamFromOllama(
       options: {
         temperature: 0.7,
         top_p: 0.9,
-        num_predict: 200,
-        stop: ['\n\n', 'User:', 'Assistant:'],
+        num_predict: 220,
+        stop: ['\nCaller:', '\nYou:'],
       },
     },
     { responseType: 'stream', signal, timeout: 60000 }
@@ -158,13 +162,12 @@ async function* streamFromOllama(
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-
       try {
         const parsed = JSON.parse(trimmed);
         if (parsed.response) yield parsed.response as string;
         if (parsed.done) return;
       } catch {
-        // Partial or malformed line — skip it rather than killing the stream.
+        // Partial or malformed line — skip rather than killing the stream.
       }
     }
   }
