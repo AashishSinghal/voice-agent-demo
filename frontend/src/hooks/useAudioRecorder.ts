@@ -2,12 +2,20 @@ import { useState, useRef, useCallback } from 'react';
 
 interface UseAudioRecorderReturn {
   isRecording: boolean;
-  startRecording: () => Promise<void>;
+  startRecording: (stream: MediaStream) => void;
   stopRecording: () => void;
+  /** Stop capturing and throw the buffered audio away (used on barge-in). */
+  discardRecording: () => void;
   error: string | null;
-  audioStream: MediaStream | null;
 }
 
+/**
+ * Records from a caller-owned MediaStream.
+ *
+ * The stream is passed in rather than acquired here: the mic now stays open
+ * for the whole call so VAD can listen during playback, and re-acquiring it
+ * per turn would both close that window and re-prompt for permission.
+ */
 export const useAudioRecorder = (
   onAudioData: (audioBlob: Blob) => void
 ): UseAudioRecorderReturn => {
@@ -16,74 +24,67 @@ export const useAudioRecorder = (
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-  const streamRef = useRef<MediaStream | null>(null);
+  const discardRef = useRef(false);
 
-  const startRecording = useCallback(async () => {
-    const ts = new Date().toISOString();
-    console.log(`[AUDIO_RECORDER ${ts}] Starting recording`);
+  const onAudioDataRef = useRef(onAudioData);
+  onAudioDataRef.current = onAudioData;
+
+  const startRecording = useCallback((stream: MediaStream) => {
+    if (mediaRecorderRef.current?.state === 'recording') return;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        }
-      });
-
-      streamRef.current = stream;
-
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/webm';
 
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType,
-        audioBitsPerSecond: 128000,
-      });
+      const recorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 128000 });
+      mediaRecorderRef.current = recorder;
+      chunksRef.current = [];
+      discardRef.current = false;
 
-      mediaRecorderRef.current = mediaRecorder;
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunksRef.current.push(event.data);
       };
 
-      mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(chunksRef.current, { type: mimeType });
-        const stopTs = new Date().toISOString();
-        console.log(`[AUDIO_RECORDER ${stopTs}] Stopped. Size: ${audioBlob.size} bytes`);
-        onAudioData(audioBlob);
+      recorder.onstop = () => {
+        const chunks = chunksRef.current;
         chunksRef.current = [];
+        mediaRecorderRef.current = null;
+
+        if (discardRef.current) {
+          console.log('[AUDIO_RECORDER] Discarded recording');
+          return;
+        }
+
+        const blob = new Blob(chunks, { type: mimeType });
+        console.log(`[AUDIO_RECORDER] Stopped. Size: ${blob.size} bytes`);
+        onAudioDataRef.current(blob);
       };
 
-      mediaRecorder.start();
+      recorder.start();
       setIsRecording(true);
       setError(null);
     } catch (err) {
-      const errTs = new Date().toISOString();
-      setError('Failed to access microphone');
-      console.error(`[AUDIO_RECORDER ${errTs}] Error:`, err);
+      console.error('[AUDIO_RECORDER] Failed to start:', err);
+      setError('Failed to start recording');
     }
-  }, [onAudioData]);
+  }, []);
 
   const stopRecording = useCallback(() => {
-    if (mediaRecorderRef.current && isRecording) {
+    if (mediaRecorderRef.current?.state === 'recording') {
+      discardRef.current = false;
       mediaRecorderRef.current.stop();
-      streamRef.current?.getTracks().forEach(track => {
-        track.stop();
-      });
-      setIsRecording(false);
-      streamRef.current = null;
     }
-  }, [isRecording]);
+    setIsRecording(false);
+  }, []);
 
-  return {
-    isRecording,
-    startRecording,
-    stopRecording,
-    error,
-    audioStream: streamRef.current,
-  };
+  const discardRecording = useCallback(() => {
+    if (mediaRecorderRef.current?.state === 'recording') {
+      discardRef.current = true;
+      mediaRecorderRef.current.stop();
+    }
+    setIsRecording(false);
+  }, []);
+
+  return { isRecording, startRecording, stopRecording, discardRecording, error };
 };

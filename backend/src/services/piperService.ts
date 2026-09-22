@@ -1,28 +1,49 @@
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 
-export async function synthesizeSpeechFromText(text: string): Promise<Buffer> {
+/**
+ * Piper TTS.
+ *
+ * Synthesis is per-sentence now rather than per-response, so this is called
+ * several times per turn and must be cancellable: when the caller interrupts,
+ * any in-flight Piper process is killed instead of finishing work whose audio
+ * nobody will hear.
+ */
+export async function synthesizeSpeechFromText(
+  text: string,
+  signal?: AbortSignal
+): Promise<Buffer> {
   const modelPath = process.env.PIPER_MODEL_PATH || './models/piper';
   const voiceModel = process.env.PIPER_MODEL || 'en_US-lessac-medium';
   const piperBin = process.env.PIPER_BIN || 'piper';
   const modelFile = path.join(modelPath, `${voiceModel}.onnx`);
-  const outputPath = path.join('/tmp', `tts_${Date.now()}.wav`);
+
+  // Random suffix: concurrent sentence synthesis would collide on a timestamp.
+  const outputPath = path.join(
+    '/tmp',
+    `tts_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.wav`
+  );
 
   if (!fs.existsSync(modelFile)) {
     throw new Error(`Piper model not found at: ${modelFile}`);
   }
 
+  if (signal?.aborted) {
+    throw new DOMException('Synthesis aborted', 'AbortError');
+  }
+
   try {
-    console.log(`🔊 Starting Piper TTS synthesis...`);
-
     await new Promise<void>((resolve, reject) => {
-      const piper = spawn(piperBin, [
-        '--model', modelFile,
-        '--output_file', outputPath,
-      ]);
+      const piper = spawn(piperBin, ['--model', modelFile, '--output_file', outputPath]);
 
-      // Send text to stdin
+      const onAbort = () => {
+        piper.kill('SIGKILL');
+        reject(new DOMException('Synthesis aborted', 'AbortError'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+
       piper.stdin.write(text);
       piper.stdin.end();
 
@@ -32,6 +53,8 @@ export async function synthesizeSpeechFromText(text: string): Promise<Buffer> {
       });
 
       piper.on('close', (code) => {
+        signal?.removeEventListener('abort', onAbort);
+        if (signal?.aborted) return; // already rejected by onAbort
         if (code !== 0) {
           console.error('❌ Piper stderr:', errorOutput);
           reject(new Error(`Piper process exited with code ${code}`));
@@ -41,25 +64,16 @@ export async function synthesizeSpeechFromText(text: string): Promise<Buffer> {
       });
 
       piper.on('error', (error) => {
-        console.error('❌ Piper spawn error:', error);
+        signal?.removeEventListener('abort', onAbort);
         reject(error);
       });
     });
 
     const audioBuffer = await fs.promises.readFile(outputPath);
-
-    console.log(`✅ TTS synthesis complete (${audioBuffer.length} bytes)`);
-
-    await fs.promises.unlink(outputPath);
-
+    await fs.promises.unlink(outputPath).catch(() => {});
     return audioBuffer;
   } catch (error) {
-    try {
-      if (fs.existsSync(outputPath)) {
-        await fs.promises.unlink(outputPath);
-      }
-    } catch {}
-
-    throw new Error(`TTS synthesis failed: ${error}`);
+    await fs.promises.unlink(outputPath).catch(() => {});
+    throw error;
   }
 }

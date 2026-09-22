@@ -8,35 +8,93 @@ export interface ConversationMessage {
   type: 'user' | 'assistant' | 'system';
   text?: string;
   timestamp: Date;
-  status?: 'transcribing' | 'processing' | 'complete' | 'error';
-  audioBuffer?: ArrayBuffer;
+  status?: 'transcribing' | 'streaming' | 'complete' | 'error' | 'interrupted';
+  turnId?: number;
 }
 
-interface UseSocketConnectionReturn {
-  connected: boolean;
-  sendAudio: (audioBlob: Blob) => void;
-  messages: ConversationMessage[];
-  startCall: () => void;
+export interface TurnMetrics {
+  firstTokenMs: number | null;
+  firstAudioMs: number | null;
+  totalMs: number;
+  chunks: number;
+}
+
+export interface AudioChunk {
+  turnId: number;
+  index: number;
+  audio: ArrayBuffer;
+}
+
+interface UseSocketConnectionOptions {
+  onAudioChunk: (chunk: AudioChunk) => void;
+  onTurnComplete: (turnId: number) => void;
+  onCancelled: () => void;
+  onReadyToListen: () => void;
+  onCallEnd?: () => void;
 }
 
 export const useSocketConnection = (
   serverUrl: string,
-  onCallEnd?: () => void,
-  onBotReady?: () => void
-): UseSocketConnectionReturn => {
+  options: UseSocketConnectionOptions
+) => {
   const socketRef = useRef<Socket | null>(null);
   const [connected, setConnected] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [metrics, setMetrics] = useState<TurnMetrics | null>(null);
 
   const { setState, setProcessingSubstatus } = useBotStateStore();
 
+  // Held in a ref so re-renders never rebuild the socket.
+  const handlersRef = useRef(options);
+  handlersRef.current = options;
+
   const addMessage = useCallback((message: Omit<ConversationMessage, 'id' | 'timestamp'>) => {
-    setMessages(prev => [...prev, {
-      ...message,
-      id: `msg-${Date.now()}-${Math.random()}`,
-      timestamp: new Date(),
-    }]);
+    setMessages((prev) => [
+      ...prev,
+      { ...message, id: `msg-${Date.now()}-${Math.random()}`, timestamp: new Date() },
+    ]);
   }, []);
+
+  /** Append a streamed token to the in-progress assistant message. */
+  const appendDelta = useCallback((turnId: number, token: string) => {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+
+      if (last && last.type === 'assistant' && last.turnId === turnId && last.status === 'streaming') {
+        const updated = [...prev];
+        updated[updated.length - 1] = { ...last, text: (last.text ?? '') + token };
+        return updated;
+      }
+
+      return [
+        ...prev,
+        {
+          id: `msg-${Date.now()}-${Math.random()}`,
+          type: 'assistant' as const,
+          text: token,
+          timestamp: new Date(),
+          status: 'streaming' as const,
+          turnId,
+        },
+      ];
+    });
+  }, []);
+
+  const finaliseMessage = useCallback(
+    (turnId: number, status: ConversationMessage['status'], text?: string) => {
+      setMessages((prev) => {
+        const updated = [...prev];
+        for (let i = updated.length - 1; i >= 0; i--) {
+          if (updated[i].type === 'assistant' && updated[i].turnId === turnId) {
+            updated[i] = { ...updated[i], status, ...(text ? { text } : {}) };
+            break;
+          }
+        }
+        return updated;
+      });
+    },
+    []
+  );
 
   useEffect(() => {
     const socket = io(serverUrl, {
@@ -46,161 +104,101 @@ export const useSocketConnection = (
       reconnectionDelayMax: 5000,
       reconnectionAttempts: 5,
     });
-
     socketRef.current = socket;
 
-    // Connection events
-    socket.on('connect', () => {
-      const ts = new Date().toISOString();
-      console.log(`[SOCKET ${ts}] Connected`);
-      setConnected(true);
-    });
-
-    socket.on('disconnect', () => {
-      const ts = new Date().toISOString();
-      console.log(`[SOCKET ${ts}] Disconnected`);
-      setConnected(false);
-    });
+    socket.on('connect', () => setConnected(true));
+    socket.on('disconnect', () => setConnected(false));
 
     socket.on('processing:start', () => {
       setState('processing', 'Server started processing');
       setProcessingSubstatus('Processing audio...');
     });
-
-    socket.on('processing:stt', () => {
-      setProcessingSubstatus('Transcribing speech...');
-    });
-
-    socket.on('processing:llm', () => {
-      setProcessingSubstatus('Generating response...');
-    });
-
-    socket.on('processing:tts', () => {
-      setProcessingSubstatus('Synthesizing speech...');
-    });
+    socket.on('processing:stt', () => setProcessingSubstatus('Transcribing speech...'));
+    socket.on('processing:llm', () => setProcessingSubstatus('Generating response...'));
+    socket.on('processing:tts', () => setProcessingSubstatus('Synthesizing speech...'));
 
     socket.on('transcription:complete', (data: { text: string }) => {
-      const ts = new Date().toISOString();
-      console.log(`[SOCKET ${ts}] Transcription: "${data.text}"`);
-
-      addMessage({
-        type: 'user',
-        text: data.text,
-        status: 'complete',
-      });
+      addMessage({ type: 'user', text: data.text, status: 'complete' });
     });
 
-    socket.on('response:text', (data: { text: string }) => {
-      const ts = new Date().toISOString();
-      console.log(`[SOCKET ${ts}] Response: "${data.text}"`);
-
-      addMessage({
-        type: 'assistant',
-        text: data.text,
-        status: 'complete',
-      });
+    socket.on('response:text:delta', (data: { turnId: number; token: string }) => {
+      appendDelta(data.turnId, data.token);
     });
 
-    socket.on('response:audio', (data: { audio: ArrayBuffer; shouldDeflect?: boolean }) => {
-      const ts = new Date().toISOString();
-      console.log(`[SOCKET ${ts}] Audio received (deflect: ${!!data.shouldDeflect})`);
-
+    socket.on('response:audio:chunk', (data: AudioChunk) => {
       setProcessingSubstatus(null);
-
-      // Update the last assistant message with audio buffer
-      setMessages(prev => {
-        const updated = [...prev];
-        // Find last assistant message (iterate backwards)
-        for (let i = updated.length - 1; i >= 0; i--) {
-          if (updated[i].type === 'assistant') {
-            updated[i] = {
-              ...updated[i],
-              audioBuffer: data.audio,
-            };
-            break;
-          }
-        }
-        return updated;
-      });
-
-      setState('speaking', 'Audio received');
+      setState('speaking', 'Audio chunk received');
+      handlersRef.current.onAudioChunk(data);
     });
 
-    socket.on('ready:listening', () => {
-      if (onBotReady) {
-        onBotReady();
+    socket.on(
+      'response:done',
+      (data: { turnId: number; text: string; metrics: TurnMetrics | null }) => {
+        finaliseMessage(data.turnId, 'complete', data.text);
+        if (data.metrics) setMetrics(data.metrics);
+        handlersRef.current.onTurnComplete(data.turnId);
       }
+    );
+
+    socket.on('turn:cancelled', (data: { turnId: number }) => {
+      console.log(`[SOCKET] Turn ${data.turnId} cancelled`);
+      finaliseMessage(data.turnId, 'interrupted');
+      setProcessingSubstatus(null);
+      handlersRef.current.onCancelled();
     });
 
-    socket.on('call:end', (data: { reason: string; message: string }) => {
-      const ts = new Date().toISOString();
-      console.log(`[SOCKET ${ts}] Call ending: ${data.reason}`);
+    socket.on('ready:listening', () => handlersRef.current.onReadyToListen());
 
-      addMessage({
-        type: 'system',
-        text: data.message,
-        status: 'complete',
-      });
-
-      if (onCallEnd) {
-        onCallEnd();
-      }
+    socket.on('call:end', (data: { message: string }) => {
+      addMessage({ type: 'system', text: data.message, status: 'complete' });
+      handlersRef.current.onCallEnd?.();
     });
 
-    // Error events
     socket.on('error', (data: { message: string }) => {
-      const ts = new Date().toISOString();
-      console.error(`[SOCKET ${ts}] Error: ${data.message}`);
-
+      console.error(`[SOCKET] Error: ${data.message}`);
       setProcessingSubstatus(null);
-
-      addMessage({
-        type: 'system',
-        text: `Error: ${data.message}`,
-        status: 'error',
-      });
+      addMessage({ type: 'system', text: `Error: ${data.message}`, status: 'error' });
     });
 
-    // Cleanup
     return () => {
       socket.disconnect();
     };
-  }, [serverUrl, addMessage, onCallEnd, onBotReady, setState, setProcessingSubstatus]);
+  }, [serverUrl, addMessage, appendDelta, finaliseMessage, setState, setProcessingSubstatus]);
 
-  const sendAudio = useCallback((audioBlob: Blob) => {
-    if (!socketRef.current || !connected) {
-      console.error('[SOCKET] Cannot send audio: Not connected');
-      return;
-    }
-
-    const ts = new Date().toISOString();
-    console.log(`[SOCKET ${ts}] Sending audio (${audioBlob.size} bytes)`);
-
-    setState('processing', 'Sending audio');
-    setProcessingSubstatus('Uploading audio...');
-
-    audioBlob.arrayBuffer().then(arrayBuffer => {
-      socketRef.current?.emit('audio:input', { audio: arrayBuffer });
-    });
-  }, [connected, setState, setProcessingSubstatus]);
+  const sendAudio = useCallback(
+    (audioBlob: Blob) => {
+      if (!socketRef.current?.connected) return;
+      setState('processing', 'Sending audio');
+      setProcessingSubstatus('Uploading audio...');
+      audioBlob.arrayBuffer().then((buf) => socketRef.current?.emit('audio:input', { audio: buf }));
+    },
+    [setState, setProcessingSubstatus]
+  );
 
   const startCall = useCallback(() => {
-    if (!socketRef.current || !connected) {
-      console.error('[SOCKET] Cannot start call: Not connected');
-      return;
-    }
-
-    const ts = new Date().toISOString();
-    console.log(`[SOCKET ${ts}] Starting call`);
-
-    setState('call_starting', 'Call started');
+    if (!socketRef.current?.connected) return;
+    setMessages([]);
+    setMetrics(null);
     socketRef.current.emit('call:start');
-  }, [connected, setState]);
+  }, []);
+
+  /** Barge-in — tell the server to abandon the turn it is working on. */
+  const interrupt = useCallback(() => {
+    socketRef.current?.emit('interrupt');
+  }, []);
+
+  /** Report that all audio for a turn has finished playing. */
+  const notifyPlaybackComplete = useCallback((turnId: number) => {
+    socketRef.current?.emit('playback:complete', { turnId });
+  }, []);
 
   return {
     connected,
-    sendAudio,
     messages,
+    metrics,
+    sendAudio,
     startCall,
+    interrupt,
+    notifyPlaybackComplete,
   };
 };
