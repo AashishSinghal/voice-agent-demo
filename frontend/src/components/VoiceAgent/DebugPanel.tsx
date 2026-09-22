@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { useBotStateStore, median, type TimelineKind } from '../../stores/useBotStateStore';
+import type { VadCalibration } from '../../hooks/useVoiceActivityDetection';
 import type { TurnMetrics } from '../../hooks/useSocketConnection';
 
 interface DebugPanelProps {
@@ -10,8 +11,7 @@ interface DebugPanelProps {
   metrics: TurnMetrics | null;
   levelRef: React.RefObject<number>;
   peakRef: React.RefObject<number>;
-  speechThreshold: number;
-  silenceThreshold: number;
+  calibrationRef: React.RefObject<VadCalibration>;
   isRecording: boolean;
 }
 
@@ -25,11 +25,13 @@ interface DebugPanelProps {
 const LevelMeter = ({
   levelRef,
   peakRef,
-  speechThreshold,
-  silenceThreshold,
-}: Pick<DebugPanelProps, 'levelRef' | 'peakRef' | 'speechThreshold' | 'silenceThreshold'>) => {
+  calibrationRef,
+}: Pick<DebugPanelProps, 'levelRef' | 'peakRef' | 'calibrationRef'>) => {
   const barRef = useRef<HTMLDivElement>(null);
+  const speechMarkRef = useRef<HTMLDivElement>(null);
+  const silenceMarkRef = useRef<HTMLDivElement>(null);
   const readoutRef = useRef<HTMLDivElement>(null);
+  const thresholdRef = useRef<HTMLDivElement>(null);
 
   // Full scale at 0.35 RMS — loud speech. Driven by rAF, not React state,
   // because this updates 60 times a second.
@@ -39,45 +41,54 @@ const LevelMeter = ({
     let frame: number;
     const tick = () => {
       const level = levelRef.current ?? 0;
+      const cal = calibrationRef.current;
+      if (!cal) {
+        frame = requestAnimationFrame(tick);
+        return;
+      }
+
       const pct = Math.min(100, (level / SCALE) * 100);
 
       if (barRef.current) {
         barRef.current.style.width = `${pct}%`;
         barRef.current.style.background =
-          level >= speechThreshold ? '#34d399' : level >= silenceThreshold ? '#fbbf24' : '#52525b';
+          level >= cal.speechThreshold
+            ? '#34d399'
+            : level >= cal.silenceThreshold
+              ? '#fbbf24'
+              : '#52525b';
+      }
+      // Markers move as the room is re-measured.
+      if (speechMarkRef.current) {
+        speechMarkRef.current.style.left = `${Math.min(100, (cal.speechThreshold / SCALE) * 100)}%`;
+      }
+      if (silenceMarkRef.current) {
+        silenceMarkRef.current.style.left = `${Math.min(100, (cal.silenceThreshold / SCALE) * 100)}%`;
       }
       if (readoutRef.current) {
         readoutRef.current.textContent =
-          `now ${level.toFixed(3)}  ·  peak ${(peakRef.current ?? 0).toFixed(3)}`;
+          `now ${level.toFixed(4)}  ·  peak ${(peakRef.current ?? 0).toFixed(4)}`;
+      }
+      if (thresholdRef.current) {
+        thresholdRef.current.textContent =
+          `floor ${cal.noiseFloor.toFixed(4)} · speech \u2265 ${cal.speechThreshold.toFixed(4)}`;
       }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [levelRef, peakRef, speechThreshold, silenceThreshold]);
-
-  const markerAt = (value: number) => `${Math.min(100, (value / SCALE) * 100)}%`;
+  }, [levelRef, peakRef, calibrationRef]);
 
   return (
     <div>
       <div className="relative h-3 w-full overflow-hidden rounded bg-zinc-900">
         <div ref={barRef} className="h-full transition-[background-color] duration-150" style={{ width: '0%' }} />
-        <div
-          className="absolute top-0 h-full w-px bg-amber-400/70"
-          style={{ left: markerAt(silenceThreshold) }}
-          title={`silence < ${silenceThreshold}`}
-        />
-        <div
-          className="absolute top-0 h-full w-px bg-emerald-400/80"
-          style={{ left: markerAt(speechThreshold) }}
-          title={`speech >= ${speechThreshold}`}
-        />
+        <div ref={silenceMarkRef} className="absolute top-0 h-full w-px bg-amber-400/70" style={{ left: '0%' }} />
+        <div ref={speechMarkRef} className="absolute top-0 h-full w-px bg-emerald-400/80" style={{ left: '0%' }} />
       </div>
       <div className="mt-1.5 space-y-0.5">
-        <div ref={readoutRef} className="font-mono text-[11px] text-zinc-400">0.000</div>
-        <div className="font-mono text-[11px] text-zinc-600">
-          silence &lt; {silenceThreshold} · speech ≥ {speechThreshold}
-        </div>
+        <div ref={readoutRef} className="font-mono text-[11px] text-zinc-400">0.0000</div>
+        <div ref={thresholdRef} className="font-mono text-[11px] text-zinc-600">calibrating…</div>
       </div>
     </div>
   );
@@ -92,11 +103,6 @@ const Row = ({ label, value }: { label: string; value: React.ReactNode }) => (
 
 const ms = (value: number | null | undefined) => (value == null ? '—' : `${value} ms`);
 
-/**
- * The hood, for when someone wants to see how the thing works: live call state,
- * per-stage latency, and the event log that shows interruptions being
- * classified.
- */
 const DebugPanel = ({
   open,
   onClose,
@@ -104,8 +110,7 @@ const DebugPanel = ({
   metrics,
   levelRef,
   peakRef,
-  speechThreshold,
-  silenceThreshold,
+  calibrationRef,
   isRecording,
 }: DebugPanelProps) => {
   const { state, events, timeline, benchmarks } = useBotStateStore();
@@ -141,16 +146,11 @@ const DebugPanel = ({
           <h3 className="mb-2 text-[11px] uppercase tracking-wider text-zinc-600">
             Microphone
           </h3>
-          <LevelMeter
-            levelRef={levelRef}
-            peakRef={peakRef}
-            speechThreshold={speechThreshold}
-            silenceThreshold={silenceThreshold}
-          />
+          <LevelMeter levelRef={levelRef} peakRef={peakRef} calibrationRef={calibrationRef} />
           <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
-            Talk normally. The bar must cross the green marker for speech to
-            register, and fall below the amber one for the turn to end. If it
-            never reaches green, the thresholds are wrong for this mic.
+            Thresholds are measured from your room, not hardcoded, so the
+            markers drift as the noise floor is re-estimated. Talk normally: the
+            bar should clear the green marker comfortably without shouting.
           </p>
         </section>
 

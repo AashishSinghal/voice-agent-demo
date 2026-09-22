@@ -5,30 +5,48 @@ interface UseVADOptions {
   onSpeechEnd?: () => void;
   /** Sustained speech — drives barge-in. */
   onSpeechStart?: () => void;
-  /** RMS below this counts as silence. 0..1 */
-  silenceThreshold?: number;
   /** ms of continuous silence before onSpeechEnd. */
   silenceDuration?: number;
-  /** RMS above this counts as speech. 0..1, above silenceThreshold. */
-  speechThreshold?: number;
   /** ms of sustained sound before onSpeechStart. */
   speechDuration?: number;
-  /** Called every frame with the current level. Keep it cheap. */
-  onLevel?: (rms: number) => void;
+  /** Multiply the measured noise floor by this to get the speech threshold. */
+  speechFactor?: number;
+  /** Multiply the measured noise floor by this to get the silence threshold. */
+  silenceFactor?: number;
 }
 
 /**
- * Microphone activity detection.
+ * Microphone activity detection with an adaptive noise gate.
  *
- * Level is measured as time-domain RMS, not an average over frequency bins.
- * The frequency-bin average is dominated by the many near-silent high bins, so
- * it reads ~5-20 even for loud speech — thresholds set against it are either
- * never reached or fire constantly. RMS maps to something meaningful:
- * roughly 0.001-0.01 for a quiet room, 0.05-0.3 for normal speech.
+ * Level is time-domain RMS, not a mean over frequency bins — the bin average
+ * is dominated by near-silent high bins and reads roughly the same whether you
+ * are talking or not.
  *
- * Two detectors run over the same signal, with separate thresholds so the
- * boundary does not chatter: speech has to clear a higher bar than silence.
+ * Thresholds are derived from the room rather than hardcoded. Microphone gain
+ * varies by an order of magnitude across machines: a level that is obviously
+ * speech on one laptop is below the noise floor on another, and a fixed
+ * threshold either ignores normal speech or triggers on the fan. The floor is
+ * estimated as a low percentile of recent frames — speech is the minority of
+ * samples in a window, so percentiles survive someone talking through the
+ * calibration.
  */
+
+/** Absolute bounds, so a dead-silent room cannot drive thresholds to zero. */
+const MIN_SPEECH_RMS = 0.010;
+const MAX_SPEECH_RMS = 0.12;
+const MIN_SILENCE_RMS = 0.006;
+
+/** Frames kept for the floor estimate (~50ms apart → about 3 seconds). */
+const FLOOR_WINDOW = 60;
+const FLOOR_SAMPLE_MS = 50;
+const FLOOR_PERCENTILE = 0.25;
+
+export interface VadCalibration {
+  noiseFloor: number;
+  speechThreshold: number;
+  silenceThreshold: number;
+}
+
 export const useVoiceActivityDetection = (
   audioStream: MediaStream | null,
   enabled: boolean,
@@ -42,44 +60,57 @@ export const useVoiceActivityDetection = (
   const levelRef = useRef(0);
   const peakRef = useRef(0);
 
+  const floorSamplesRef = useRef<number[]>([]);
+  const lastFloorSampleRef = useRef(0);
+  const calibrationRef = useRef<VadCalibration>({
+    noiseFloor: 0,
+    speechThreshold: MIN_SPEECH_RMS,
+    silenceThreshold: MIN_SILENCE_RMS,
+  });
+
   const {
     onSpeechEnd,
     onSpeechStart,
-    silenceThreshold = 0.02,
-    silenceDuration = 1200,
-    speechThreshold = 0.045,
+    silenceDuration = 900,
     speechDuration = 250,
-    onLevel,
+    speechFactor = 3.0,
+    silenceFactor = 1.8,
   } = options;
 
-  // Callbacks and tuning live in refs so changing them never rebuilds the
-  // audio graph. silenceDuration in particular is adjusted mid-call — a short
-  // window while triaging over-speech, a longer one for a normal turn — and
-  // rebuilding an AudioContext on every change would glitch the mic.
   const endRef = useRef(onSpeechEnd);
   const startRef = useRef(onSpeechStart);
-  const levelCbRef = useRef(onLevel);
-  const tuningRef = useRef({ silenceThreshold, silenceDuration, speechThreshold, speechDuration });
+  const tuningRef = useRef({ silenceDuration, speechDuration, speechFactor, silenceFactor });
   useEffect(() => {
     endRef.current = onSpeechEnd;
     startRef.current = onSpeechStart;
-    levelCbRef.current = onLevel;
-    tuningRef.current = { silenceThreshold, silenceDuration, speechThreshold, speechDuration };
-  }, [
-    onSpeechEnd,
-    onSpeechStart,
-    onLevel,
-    silenceThreshold,
-    silenceDuration,
-    speechThreshold,
-    speechDuration,
-  ]);
+    tuningRef.current = { silenceDuration, speechDuration, speechFactor, silenceFactor };
+  }, [onSpeechEnd, onSpeechStart, silenceDuration, speechDuration, speechFactor, silenceFactor]);
+
+  /** Low percentile of recent frames — a robust stand-in for "the room". */
+  const updateNoiseFloor = useCallback((rms: number) => {
+    const now = Date.now();
+    if (now - lastFloorSampleRef.current < FLOOR_SAMPLE_MS) return;
+    lastFloorSampleRef.current = now;
+
+    const samples = floorSamplesRef.current;
+    samples.push(rms);
+    if (samples.length > FLOOR_WINDOW) samples.shift();
+    if (samples.length < 8) return;
+
+    const sorted = [...samples].sort((a, b) => a - b);
+    const floor = sorted[Math.floor(sorted.length * FLOOR_PERCENTILE)];
+
+    const { speechFactor: sf, silenceFactor: qf } = tuningRef.current;
+    calibrationRef.current = {
+      noiseFloor: floor,
+      speechThreshold: Math.min(MAX_SPEECH_RMS, Math.max(MIN_SPEECH_RMS, floor * sf)),
+      silenceThreshold: Math.max(MIN_SILENCE_RMS, floor * qf),
+    };
+  }, []);
 
   const check = useCallback(() => {
     const analyser = analyserRef.current;
     if (!analyser) return;
-
-    const tuning = tuningRef.current;
 
     const data = new Uint8Array(analyser.fftSize);
     analyser.getByteTimeDomainData(data);
@@ -94,15 +125,21 @@ export const useVoiceActivityDetection = (
 
     levelRef.current = rms;
     if (rms > peakRef.current) peakRef.current = rms;
-    levelCbRef.current?.(rms);
+    updateNoiseFloor(rms);
+
+    const { speechThreshold, silenceThreshold } = calibrationRef.current;
+    const tuning = tuningRef.current;
 
     // --- sustained speech -> onSpeechStart ---
-    if (rms >= tuning.speechThreshold) {
+    if (rms >= speechThreshold) {
       if (speechSinceRef.current === null) speechSinceRef.current = Date.now();
 
       if (!speakingRef.current && Date.now() - speechSinceRef.current >= tuning.speechDuration) {
         speakingRef.current = true;
-        console.log(`[VAD] speech start (rms ${rms.toFixed(3)})`);
+        console.log(
+          `[VAD] speech start — rms ${rms.toFixed(4)} over ${speechThreshold.toFixed(4)} ` +
+            `(floor ${calibrationRef.current.noiseFloor.toFixed(4)})`
+        );
         startRef.current?.();
       }
     } else {
@@ -110,17 +147,17 @@ export const useVoiceActivityDetection = (
     }
 
     // --- continuous silence -> onSpeechEnd ---
-    if (rms < tuning.silenceThreshold) {
+    if (rms < silenceThreshold) {
       if (silenceTimerRef.current === null) {
-        const window_ms = tuning.silenceDuration;
+        const windowMs = tuning.silenceDuration;
         silenceTimerRef.current = window.setTimeout(() => {
-          // Clear first: without this the ref stays set and no further
-          // silence period can ever arm a new timer.
+          // Clear first: leaving this set means no later silence period can
+          // ever arm a new timer.
           silenceTimerRef.current = null;
           speakingRef.current = false;
-          console.log(`[VAD] speech end (${window_ms}ms silence)`);
+          console.log(`[VAD] speech end (${windowMs}ms silence)`);
           endRef.current?.();
-        }, window_ms);
+        }, windowMs);
       }
     } else if (silenceTimerRef.current !== null) {
       clearTimeout(silenceTimerRef.current);
@@ -128,7 +165,7 @@ export const useVoiceActivityDetection = (
     }
 
     frameRef.current = requestAnimationFrame(check);
-  }, []);
+  }, [updateNoiseFloor]);
 
   useEffect(() => {
     if (!audioStream || !enabled) return;
@@ -143,12 +180,10 @@ export const useVoiceActivityDetection = (
     speakingRef.current = false;
     speechSinceRef.current = null;
     peakRef.current = 0;
+    floorSamplesRef.current = [];
+    lastFloorSampleRef.current = 0;
 
-    console.log(
-      `[VAD] started — speech >= ${speechThreshold}, silence < ${silenceThreshold} ` +
-        `for ${silenceDuration}ms`
-    );
-
+    console.log('[VAD] started — calibrating noise floor from the room');
     check();
 
     return () => {
@@ -163,5 +198,5 @@ export const useVoiceActivityDetection = (
     };
   }, [audioStream, enabled, check]);
 
-  return { levelRef, peakRef };
+  return { levelRef, peakRef, calibrationRef };
 };

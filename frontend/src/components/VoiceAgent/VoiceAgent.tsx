@@ -13,11 +13,22 @@ import { toast } from 'sonner';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
 
-/** Time-domain RMS thresholds. A quiet room sits near 0.005; speech 0.05-0.3. */
-const SPEECH_RMS = 0.045;
-const SILENCE_RMS = 0.02;
-/** Longest single recording before we send it regardless. */
+/**
+ * Thresholds are calibrated from the room by the VAD hook; these are the
+ * multipliers applied to the measured noise floor.
+ */
+const SPEECH_FACTOR = 3.0;
+const SILENCE_FACTOR = 1.8;
+
+/** Longest single utterance before we send it regardless. */
 const MAX_TURN_MS = 15_000;
+/**
+ * A recording holding nothing but silence is thrown away and restarted after
+ * this long. Without it the buffer grows for as long as the caller is quiet,
+ * and the next utterance is delivered with minutes of dead air — or worse,
+ * with earlier attempts that never flushed — glued to the front of it.
+ */
+const IDLE_RECYCLE_MS = 4_000;
 
 /**
  * How long a pause has to last before the caller is considered finished.
@@ -76,9 +87,9 @@ const VoiceAgent = () => {
   const spokenAtBargeRef = useRef(0);
   /** Guards against sending a recording that contains no speech. */
   const sawSpeechRef = useRef(false);
-  /** Force-send a recording that runs too long, so a missed speech-end
-   *  cannot leave the caller talking into the void forever. */
-  const maxTurnTimerRef = useRef<number | null>(null);
+  /** When the current recording began, and when speech within it began. */
+  const recordingStartedAtRef = useRef(0);
+  const speechStartedAtRef = useRef(0);
 
   const notifyCompleteRef = useRef<(turnId: number) => void>(() => {});
 
@@ -132,37 +143,39 @@ const VoiceAgent = () => {
     if (state === 'listening' && !recorder.isRecording) {
       sawSpeechRef.current = false;
       bargeRef.current = false;
+      recordingStartedAtRef.current = Date.now();
       recorder.startRecording(stream);
       trace('recording started', 'waiting for speech');
     }
   }, [state, isCallActive, stream, recorder, trace]);
 
-  // Safety net: if speech-end never fires (mic too quiet, threshold too high),
-  // send what we have rather than listening forever.
+  // Watchdog. Two failure modes to contain: a recording that is all silence
+  // (throw it away before it accumulates), and one where speech-end never
+  // fires (send it rather than listening forever).
   useEffect(() => {
-    if (!recorder.isRecording) {
-      if (maxTurnTimerRef.current) {
-        clearTimeout(maxTurnTimerRef.current);
-        maxTurnTimerRef.current = null;
-      }
-      return;
-    }
+    if (!recorder.isRecording) return;
 
-    maxTurnTimerRef.current = window.setTimeout(() => {
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+
       if (!sawSpeechRef.current) {
-        trace('no speech detected', 'still listening — check mic level in debug');
+        if (now - recordingStartedAtRef.current > IDLE_RECYCLE_MS) {
+          trace('recycled recording', 'only silence captured');
+          recorder.discardRecording();
+        }
         return;
       }
-      trace('max turn length', 'force-sending recording');
-      sawSpeechRef.current = false;
-      recorder.stopRecording();
-    }, MAX_TURN_MS);
 
-    return () => {
-      if (maxTurnTimerRef.current) clearTimeout(maxTurnTimerRef.current);
-      maxTurnTimerRef.current = null;
-    };
-  }, [recorder.isRecording, recorder, trace]);
+      if (now - speechStartedAtRef.current > MAX_TURN_MS) {
+        trace('max turn length', 'force-sending recording');
+        sawSpeechRef.current = false;
+        setUserSpeaking(false);
+        recorder.stopRecording();
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [recorder.isRecording, recorder, trace, setUserSpeaking]);
 
   /**
    * Caller started speaking over the agent.
@@ -172,6 +185,7 @@ const VoiceAgent = () => {
    * either tells us to resume or confirms the interruption.
    */
   const handleSpeechStart = useCallback(() => {
+    if (!sawSpeechRef.current) speechStartedAtRef.current = Date.now();
     sawSpeechRef.current = true;
     // Reflect this immediately. Waiting for the server to say so costs a round
     // trip and makes the interface feel a beat behind the caller.
@@ -194,7 +208,10 @@ const VoiceAgent = () => {
     trace('over-speech', `paused after ${played} chunk(s)`);
     notifyBarge(0, played);
 
-    if (stream && !recorder.isRecording) recorder.startRecording(stream);
+    if (stream && !recorder.isRecording) {
+      recordingStartedAtRef.current = Date.now();
+      recorder.startRecording(stream);
+    }
   }, [playback, notifyBarge, stream, recorder, trace, setUserSpeaking, startTimeline, markTimeline]);
 
   const handleSpeechEnd = useCallback(() => {
@@ -218,13 +235,13 @@ const VoiceAgent = () => {
     recorder.stopRecording();
   }, [recorder, trace, setUserSpeaking, markTimeline, setCallState]);
 
-  const { levelRef, peakRef } = useVoiceActivityDetection(stream, isCallActive, {
+  const { levelRef, peakRef, calibrationRef } = useVoiceActivityDetection(stream, isCallActive, {
     onSpeechStart: handleSpeechStart,
     onSpeechEnd: handleSpeechEnd,
-    silenceThreshold: SILENCE_RMS,
     silenceDuration: state === 'paused' ? ENDPOINT_OVER_SPEECH_MS : ENDPOINT_MS,
-    speechThreshold: SPEECH_RMS,
     speechDuration: 250,
+    speechFactor: SPEECH_FACTOR,
+    silenceFactor: SILENCE_FACTOR,
   });
 
   const handleStart = useCallback(async () => {
@@ -310,8 +327,7 @@ const VoiceAgent = () => {
         metrics={metrics}
         levelRef={levelRef}
         peakRef={peakRef}
-        speechThreshold={SPEECH_RMS}
-        silenceThreshold={SILENCE_RMS}
+        calibrationRef={calibrationRef}
         isRecording={recorder.isRecording}
       />
     </div>
