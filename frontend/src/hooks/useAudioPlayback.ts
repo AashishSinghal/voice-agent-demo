@@ -153,6 +153,10 @@ export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {})
   /** Sentence chunks fully played for the current turn. */
   const chunksPlayed = useCallback(() => chunksPlayedRef.current, []);
 
+  /** The turn currently being played, if any. Needed to report a barge-in
+   *  against the right turn — the server ignores an unknown one. */
+  const currentTurn = useCallback(() => activeTurnRef.current, []);
+
   /** Start counting again for a new turn. */
   const resetCounter = useCallback(() => {
     chunksPlayedRef.current = 0;
@@ -167,6 +171,7 @@ export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {})
     resume,
     stop,
     chunksPlayed,
+    currentTurn,
     resetCounter,
     isPlaying,
   };

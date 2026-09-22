@@ -24,12 +24,21 @@ const SILENCE_FACTOR = 1.8;
 /** Longest single utterance before we send it regardless. */
 const MAX_TURN_MS = 15_000;
 /**
- * A recording holding nothing but silence is thrown away and restarted after
- * this long. Without it the buffer grows for as long as the caller is quiet,
- * and the next utterance is delivered with minutes of dead air — or worse,
- * with earlier attempts that never flushed — glued to the front of it.
+ * A recording holding nothing but silence is recycled after this long, to cap
+ * how much audio is buffered. The server trims to the speech onset anyway, so
+ * this only bounds memory rather than affecting what gets transcribed.
  */
-const IDLE_RECYCLE_MS = 4_000;
+const IDLE_RECYCLE_MS = 10_000;
+
+/**
+ * Audio kept before the detected speech onset when trimming.
+ *
+ * Detection needs 250ms of sustained sound to be confident, and people do not
+ * start a sentence at full volume, so the true onset is earlier than the
+ * detection. Without this margin the first word is clipped — which is exactly
+ * how "explain software engineering" arrived as "engineering".
+ */
+const PREROLL_MS = 700;
 
 /**
  * How long a pause has to last before the caller is considered finished.
@@ -127,9 +136,18 @@ const VoiceAgent = () => {
 
   const recorder = useAudioRecorder((blob) => {
     markTimeline('audio sent');
+
+    // Tell the server where the caller actually started talking, so the
+    // silence (and any of the agent's own audio) before it can be trimmed.
+    const trimStartMs = Math.max(
+      0,
+      Math.round(speechStartedAtRef.current - recordingStartedAtRef.current - PREROLL_MS)
+    );
+
     sendAudio(blob, {
       duringPlayback: bargeRef.current,
       spokenChunks: spokenAtBargeRef.current,
+      trimStartMs,
     });
   });
 
@@ -138,17 +156,27 @@ const VoiceAgent = () => {
     if (error) toast.error(error);
   }, [micError, recorder.error]);
 
-  // Capture continuously whenever the agent is waiting on the caller.
+  /**
+   * The microphone is always recording for the whole call, not just while the
+   * agent is idle. Starting a recording only once speech is confirmed loses
+   * the onset by definition — the first word is already spoken by the time
+   * detection fires. Recording continuously means the onset is always
+   * captured; the server trims back to it.
+   */
+  const beginRecording = useCallback(() => {
+    if (!stream || recorder.isRecording) return;
+    sawSpeechRef.current = false;
+    bargeRef.current = false;
+    speechStartedAtRef.current = 0;
+    recordingStartedAtRef.current = Date.now();
+    recorder.startRecording(stream);
+    trace('recording started', 'always-on capture');
+  }, [stream, recorder, trace]);
+
   useEffect(() => {
     if (!isCallActive || !stream) return;
-    if (state === 'listening' && !recorder.isRecording) {
-      sawSpeechRef.current = false;
-      bargeRef.current = false;
-      recordingStartedAtRef.current = Date.now();
-      recorder.startRecording(stream);
-      trace('recording started', 'waiting for speech');
-    }
-  }, [state, isCallActive, stream, recorder, trace]);
+    if (!recorder.isRecording) beginRecording();
+  }, [isCallActive, stream, recorder.isRecording, beginRecording, recorder]);
 
   // Watchdog. Two failure modes to contain: a recording that is all silence
   // (throw it away before it accumulates), and one where speech-end never
@@ -207,13 +235,11 @@ const VoiceAgent = () => {
     playback.pause();
     markTimeline('playback paused');
     trace('over-speech', `paused after ${played} chunk(s)`);
-    notifyBarge(0, played);
 
-    if (stream && !recorder.isRecording) {
-      recordingStartedAtRef.current = Date.now();
-      recorder.startRecording(stream);
-    }
-  }, [playback, notifyBarge, stream, recorder, trace, setUserSpeaking, startTimeline, markTimeline]);
+    // The real turn id matters: the server ignores a barge reported against a
+    // turn it does not recognise, and then never enters its paused state.
+    notifyBarge(playback.currentTurn() ?? 0, played);
+  }, [playback, notifyBarge, trace, setUserSpeaking, startTimeline, markTimeline]);
 
   const handleSpeechEnd = useCallback(() => {
     if (!recorder.isRecording) {

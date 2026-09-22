@@ -2,14 +2,25 @@ import ffmpeg from 'fluent-ffmpeg';
 import path from 'path';
 import fs from 'fs';
 
-export async function convertToWav(inputPath: string): Promise<string> {
+/**
+ * Convert to the 16 kHz mono WAV Whisper expects.
+ *
+ * `trimStartMs` drops everything before the caller actually started talking.
+ * The microphone records for the whole call, so a clip can otherwise open with
+ * seconds of room tone — or the agent's own voice, when the caller spoke over
+ * it — both of which the transcriber will happily try to make words out of.
+ */
+export async function convertToWav(inputPath: string, trimStartMs = 0): Promise<string> {
   const outputPath = path.join(
     path.dirname(inputPath),
     `${path.basename(inputPath, path.extname(inputPath))}_converted.wav`
   );
 
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
+    const command = ffmpeg(inputPath);
+    if (trimStartMs > 0) command.setStartTime(trimStartMs / 1000);
+
+    command
       .audioFrequency(16000) // 16kHz for Whisper
       .audioChannels(1) // Mono
       .audioCodec('pcm_s16le') // 16-bit PCM

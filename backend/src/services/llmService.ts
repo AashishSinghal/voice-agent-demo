@@ -37,19 +37,31 @@ function systemPrompt(): string {
   return `${persona}
 
 The caller can interrupt you at any time. If a previous turn of yours is marked
-as interrupted, the caller only heard the part shown — assume they did not hear
-anything you had planned to say after it. Do not refer to it as if they had.`;
+as cut off, the caller only heard the part shown. Anything in square brackets
+after it was never spoken aloud — do not refer to it as if they had heard it,
+but you do remember it, so you can pick that thread back up if they ask you to
+return to it.`;
 }
 
-/** Render the conversation as a transcript the model can reason about. */
+/**
+ * Render the conversation as a transcript the model can reason about.
+ *
+ * Interrupted turns carry both halves: what the caller heard, and what was
+ * cut off. Keeping the unsaid part in the transcript is what lets the caller
+ * come back later — "go back to what you were explaining before" — and get a
+ * continuation rather than a blank look. It is labelled explicitly as unheard
+ * so the model does not treat it as already delivered.
+ */
 function renderHistory(history: Turn[]): string {
   return history
     .map((turn) => {
       if (turn.role === 'user') return `Caller: ${turn.content}`;
-      if (turn.interrupted) {
-        return `You (interrupted here by the caller): ${turn.content}`;
-      }
-      return `You: ${turn.content}`;
+      if (!turn.interrupted) return `You: ${turn.content}`;
+
+      const heard = `You (cut off here by the caller): ${turn.content}`;
+      if (!turn.unspoken) return heard;
+
+      return `${heard}\n  [not heard by the caller, you never got to say it: ${turn.unspoken}]`;
     })
     .join('\n');
 }

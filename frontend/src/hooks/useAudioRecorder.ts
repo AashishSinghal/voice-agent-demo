@@ -5,7 +5,7 @@ interface UseAudioRecorderReturn {
   isRecording: boolean;
   startRecording: (stream: MediaStream) => void;
   stopRecording: () => void;
-  /** Stop capturing and throw the buffered audio away (used on barge-in). */
+  /** Stop capturing and throw the buffered audio away. */
   discardRecording: () => void;
   error: string | null;
 }

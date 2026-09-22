@@ -271,7 +271,8 @@ io.on('connection', (socket: Socket) => {
   /** Transcribe a recorded blob. Returns null if nothing usable was heard. */
   const transcribe = async (
     audio: ArrayBuffer,
-    timeline?: Timeline
+    timeline?: Timeline,
+    trimStartMs = 0
   ): Promise<{ text: string; ms: number } | null> => {
     const tempPath = path.join(
       'uploads',
@@ -283,7 +284,7 @@ io.on('connection', (socket: Socket) => {
     try {
       await fs.promises.mkdir('uploads', { recursive: true });
       await fs.promises.writeFile(tempPath, Buffer.from(audio));
-      convertedPath = await audioProcessor.convertToWav(tempPath);
+      convertedPath = await audioProcessor.convertToWav(tempPath, trimStartMs);
       timeline?.mark('audio converted');
 
       const result = await withTimeout(
@@ -390,7 +391,12 @@ io.on('connection', (socket: Socket) => {
 
   socket.on(
     'audio:input',
-    async (data: { audio: ArrayBuffer; duringPlayback?: boolean; spokenChunks?: number }) => {
+    async (data: {
+      audio: ArrayBuffer;
+      duringPlayback?: boolean;
+      spokenChunks?: number;
+      trimStartMs?: number;
+    }) => {
       try {
         if (!data?.audio) return;
 
@@ -398,7 +404,7 @@ io.on('connection', (socket: Socket) => {
           const timeline = new Timeline();
           setState('thinking');
 
-          const result = await transcribe(data.audio, timeline);
+          const result = await transcribe(data.audio, timeline, data.trimStartMs ?? 0);
           if (!result) {
             setState('listening');
             socket.emit('ready:listening', { turnId: session.turnId });
@@ -422,7 +428,7 @@ io.on('connection', (socket: Socket) => {
 
         const timeline = new Timeline();
 
-        const result = await transcribe(data.audio, timeline);
+        const result = await transcribe(data.audio, timeline, data.trimStartMs ?? 0);
         const classification = classifyUtterance(result?.text ?? '');
         timeline.mark(`classified ${classification.kind}`);
 
