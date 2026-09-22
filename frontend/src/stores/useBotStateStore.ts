@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { diag } from '../lib/diagnostics';
 
 /**
  * Call state, mirrored from the server so both sides agree.
@@ -84,7 +85,7 @@ export const useBotStateStore = create<BotStateStore>((set, get) => ({
   setState: (next, reason) => {
     const current = get().state;
     if (current === next) return;
-    console.log(`[STATE] ${current} -> ${next}${reason ? ` (${reason})` : ''}`);
+    diag.log('client', 'state', { from: current, to: next, reason });
     set({ state: next });
     get().logEvent(`${current} → ${next}`, reason);
   },
@@ -136,6 +137,7 @@ export const useBotStateStore = create<BotStateStore>((set, get) => ({
 
     const total = Math.round(performance.now() - timelineStart);
     get().markTimeline(label);
+    diag.log('client', 'timeline complete', { kind, totalMs: total });
 
     set((s) => {
       const bench = s.benchmarks[kind];

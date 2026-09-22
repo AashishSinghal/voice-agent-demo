@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
+import { diag } from '../lib/diagnostics';
 
 interface UseAudioRecorderReturn {
   isRecording: boolean;
@@ -51,17 +52,20 @@ export const useAudioRecorder = (
         chunksRef.current = [];
         mediaRecorderRef.current = null;
 
+        const size = chunks.reduce((total, chunk) => total + chunk.size, 0);
+
         if (discardRef.current) {
-          console.log('[AUDIO_RECORDER] Discarded recording');
+          diag.log('audio', 'recording discarded', { bytes: size });
           return;
         }
 
         const blob = new Blob(chunks, { type: mimeType });
-        console.log(`[AUDIO_RECORDER] Stopped. Size: ${blob.size} bytes`);
+        diag.log('audio', 'recording ready', { bytes: blob.size, parts: chunks.length });
         onAudioDataRef.current(blob);
       };
 
       recorder.start();
+      diag.log('audio', 'recorder started', { mimeType });
       setIsRecording(true);
       setError(null);
     } catch (err) {

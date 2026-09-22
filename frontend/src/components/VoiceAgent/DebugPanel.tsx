@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
-import { X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Check, Copy, Download, X } from 'lucide-react';
 import { useBotStateStore, median, type TimelineKind } from '../../stores/useBotStateStore';
 import type { VadCalibration } from '../../hooks/useVoiceActivityDetection';
+import { diag } from '../../lib/diagnostics';
 import type { TurnMetrics } from '../../hooks/useSocketConnection';
 
 interface DebugPanelProps {
@@ -114,6 +115,11 @@ const DebugPanel = ({
   isRecording,
 }: DebugPanelProps) => {
   const { state, events, timeline, benchmarks } = useBotStateStore();
+  const [copied, setCopied] = useState(false);
+  const [entryCount, setEntryCount] = useState(0);
+
+  // The recorder is not React state; subscribe so the count stays current.
+  useEffect(() => diag.subscribe(() => setEntryCount(diag.count)), []);
 
   return (
     <aside
@@ -135,6 +141,44 @@ const DebugPanel = ({
       </div>
 
       <div className="space-y-6 overflow-y-auto px-5 py-4" style={{ height: 'calc(100% - 57px)' }}>
+        <section>
+          <h3 className="mb-2 text-[11px] uppercase tracking-wider text-zinc-600">
+            Diagnostics
+          </h3>
+          <div className="flex gap-2">
+            <button
+              onClick={async () => {
+                const ok = await diag.copy();
+                setCopied(ok);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-300 transition hover:bg-white/5"
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+              {copied ? 'Copied' : 'Copy log'}
+            </button>
+            <button
+              onClick={() => diag.download()}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-300 transition hover:bg-white/5"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Download
+            </button>
+            <button
+              onClick={() => {
+                diag.reset();
+                setEntryCount(0);
+              }}
+              className="rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-500 transition hover:bg-white/5 hover:text-zinc-300"
+            >
+              Clear
+            </button>
+          </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
+            {entryCount} events captured — client, server, socket traffic and
+            microphone level, in one timeline. Audio is recorded by size only.
+          </p>
+        </section>
         <section>
           <h3 className="mb-1 text-[11px] uppercase tracking-wider text-zinc-600">State</h3>
           <Row label="call state" value={state} />

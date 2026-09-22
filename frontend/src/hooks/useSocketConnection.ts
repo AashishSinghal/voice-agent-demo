@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import type { Socket } from 'socket.io-client';
 import { io } from 'socket.io-client';
 import { useBotStateStore, type CallState } from '../stores/useBotStateStore';
+import { diag } from '../lib/diagnostics';
 
 export interface ConversationMessage {
   id: string;
@@ -107,8 +108,38 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     });
     socketRef.current = socket;
 
-    socket.on('connect', () => setConnected(true));
-    socket.on('disconnect', () => setConnected(false));
+    // Everything the server sends, logged once, centrally. Audio is recorded
+    // by size only — the bytes are useless in a log and enormous.
+    socket.onAny((event: string, payload?: Record<string, unknown>) => {
+      if (event === 'debug:trace') return; // mirrored server line, handled below
+      const audio = payload?.audio as ArrayBuffer | undefined;
+      const rest = payload
+        ? Object.fromEntries(
+            Object.entries(payload)
+              .filter(([key]) => key !== 'audio')
+              .map(([key, value]) => [
+                key,
+                typeof value === 'string' && value.length > 120 ? `${value.slice(0, 120)}…` : value,
+              ])
+          )
+        : {};
+      diag.log('socket-in', event, { ...rest, ...(audio ? { audioBytes: audio.byteLength } : {}) });
+    });
+
+    // Server-side log lines, interleaved into the same timeline.
+    socket.on('debug:trace', (d: { direction?: string; event: string; detail?: string }) => {
+      diag.log('server', `${d.direction ? `${d.direction} ` : ''}${d.event}`,
+        d.detail ? { detail: d.detail } : undefined);
+    });
+
+    socket.on('connect', () => {
+      diag.log('socket-in', 'connect');
+      setConnected(true);
+    });
+    socket.on('disconnect', (reason: string) => {
+      diag.log('socket-in', 'disconnect', { reason });
+      setConnected(false);
+    });
 
     // The server is the source of truth for call state.
     socket.on('state', (data: { state: CallState }) => {
@@ -197,6 +228,11 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
   const sendAudio = useCallback(
     (blob: Blob, opts: { duringPlayback: boolean; spokenChunks: number }) => {
       if (!socketRef.current?.connected) return;
+      diag.log('socket-out', 'audio:input', {
+        bytes: blob.size,
+        duringPlayback: opts.duringPlayback,
+        spokenChunks: opts.spokenChunks,
+      });
       blob.arrayBuffer().then((audio) =>
         socketRef.current?.emit('audio:input', {
           audio,
@@ -212,17 +248,23 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     if (!socketRef.current?.connected) return;
     setMessages([]);
     setMetrics(null);
+    diag.log('socket-out', 'call:start');
     socketRef.current.emit('call:start');
   }, []);
 
-  const endCall = useCallback(() => socketRef.current?.emit('call:end'), []);
+  const endCall = useCallback(() => {
+    diag.log('socket-out', 'call:end');
+    socketRef.current?.emit('call:end');
+  }, []);
 
   /** Caller began speaking over the agent; playback is paused pending triage. */
   const notifyBarge = useCallback((turnId: number, chunksPlayed: number) => {
+    diag.log('socket-out', 'barge:detected', { turnId, chunksPlayed });
     socketRef.current?.emit('barge:detected', { turnId, chunksPlayed });
   }, []);
 
   const notifyPlaybackComplete = useCallback((turnId: number) => {
+    diag.log('socket-out', 'playback:complete', { turnId });
     socketRef.current?.emit('playback:complete', { turnId });
   }, []);
 

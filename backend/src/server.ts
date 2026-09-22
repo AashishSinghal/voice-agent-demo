@@ -56,6 +56,12 @@ const io = new Server(httpServer, {
 
 const GREETING = process.env.AGENT_GREETING || "Hey, I'm listening. What can I help you with?";
 const STT_TIMEOUT_MS = 20_000;
+/**
+ * How long a busy state may go without progress before the watchdog steps in.
+ * Generous: a long final sentence can take several seconds to play out on the
+ * client before playback:complete arrives.
+ */
+const STUCK_TIMEOUT_MS = 20_000;
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
@@ -88,21 +94,38 @@ interface Session {
   resumeHint: string | null;
 }
 
-/** Compact, timestamped event log for both directions of the socket. */
-function traceFactory(socketId: string) {
+/**
+ * Compact, timestamped event log for both directions of the socket.
+ *
+ * Lines are mirrored to the client over `debug:trace` so a single exported
+ * diagnostic file contains both halves of the conversation, interleaved.
+ * Without that, debugging a timing problem means correlating two logs by hand.
+ */
+function traceFactory(socketId: string, mirror: (event: string, payload: unknown) => void) {
   const short = socketId.slice(0, 6);
   return (direction: '<-' | '->', event: string, detail?: string) => {
     const at = new Date().toISOString().slice(11, 23);
     console.log(`${at} [${short}] ${direction} ${event}${detail ? ` ${detail}` : ''}`);
+    mirror('debug:trace', { direction, event, detail });
+  };
+}
+
+/** Server-side note with no socket direction, also mirrored to the client. */
+function noteFactory(mirror: (event: string, payload: unknown) => void) {
+  return (event: string, data?: Record<string, unknown>) => {
+    mirror('debug:trace', { event, ...(data ? { detail: JSON.stringify(data) } : {}) });
   };
 }
 
 io.on('connection', (socket: Socket) => {
-  const trace = traceFactory(socket.id);
+  // Bind the raw emitter first: tracing uses it, and the wrapper below traces.
+  const rawEmit = socket.emit.bind(socket);
+  const trace = traceFactory(socket.id, (event, payload) => rawEmit(event, payload as never));
+  const note = noteFactory((event, payload) => rawEmit(event, payload as never));
+
   console.log(`🔌 Client connected: ${socket.id}`);
 
   // Log every outbound event. Audio payloads are summarised, not dumped.
-  const rawEmit = socket.emit.bind(socket);
   socket.emit = ((event: string, payload?: Record<string, unknown>) => {
     let detail = '';
     if (payload && typeof payload === 'object') {
@@ -126,6 +149,7 @@ io.on('connection', (socket: Socket) => {
       : [];
     if (audio) parts.push(`audio=${audio.byteLength}B`);
     trace('<-', event, parts.join(' '));
+    progress();
   });
 
   const session: Session = {
@@ -139,10 +163,25 @@ io.on('connection', (socket: Socket) => {
     resumeHint: null,
   };
 
+  /** Last time anything moved. A busy state with no recent progress is stuck. */
+  let lastProgressAt = Date.now();
+  const progress = () => {
+    lastProgressAt = Date.now();
+  };
+
   const setState = (state: CallState) => {
     if (session.state === state) return;
     session.state = state;
+    progress();
     socket.emit('state', { state });
+  };
+
+  const backToListening = (why: string) => {
+    note('return to listening', { why, from: session.state });
+    session.pendingText = null;
+    session.pendingTurnId = null;
+    setState('listening');
+    socket.emit('ready:listening', { turnId: session.turnId });
   };
 
   const abortActiveTurn = (reason: string) => {
@@ -184,6 +223,7 @@ io.on('connection', (socket: Socket) => {
       }
 
       session.conversation.trackChunk(turnId, chunk);
+      progress();
       socket.emit('response:audio:chunk', { turnId, index: chunkIndex++, text: chunk, audio });
     };
 
@@ -223,6 +263,7 @@ io.on('connection', (socket: Socket) => {
       `📊 turn ${turnId}: stt ${sttMs}ms · first token ${firstTokenMs}ms · ` +
         `first audio ${firstAudioMs}ms · total ${metrics.totalMs}ms · ${chunkIndex} chunks`
     );
+    note('turn metrics', { turnId, ...metrics, text });
 
     socket.emit('response:done', { turnId, text, metrics });
   };
@@ -255,6 +296,7 @@ io.on('connection', (socket: Socket) => {
       const text = result.text?.trim();
       const ms = Date.now() - startedAt;
       console.log(`🗣  transcript (${ms}ms): ${text ? JSON.stringify(text) : '<nothing heard>'}`);
+      note('transcript', { ms, text: text ?? null, bytes: audio.byteLength });
       return text ? { text, ms } : null;
     } finally {
       await audioProcessor.cleanupAudioFile(tempPath);
@@ -265,6 +307,16 @@ io.on('connection', (socket: Socket) => {
   /** Run a caller utterance through generation, as a fresh turn. */
   const handleUtterance = async (text: string, sttMs: number | null) => {
     abortActiveTurn('new caller turn');
+
+    // If a turn was in flight and nobody committed it, record it now. Without
+    // this the assistant's half-finished answer vanishes from history, and the
+    // agent genuinely cannot recall a topic it had started explaining.
+    if (session.conversation.hasPending()) {
+      const salvaged = session.conversation.commitPendingAsInterrupted();
+      note('salvaged in-flight turn', { chars: salvaged.length });
+    }
+    session.pendingText = null;
+    session.pendingTurnId = null;
 
     session.turnId += 1;
     const turnId = session.turnId;
@@ -377,6 +429,11 @@ io.on('connection', (socket: Socket) => {
         console.log(
           `🔎 Over-speech classified as ${classification.kind}: "${classification.normalised}"`
         );
+        note('classification', {
+          kind: classification.kind,
+          normalised: classification.normalised,
+          spokenChunks,
+        });
 
         // The caller said something either way — it belongs in the transcript,
         // marked so a backchannel is not mistaken for a real question.
@@ -389,6 +446,20 @@ io.on('connection', (socket: Socket) => {
         }
 
         if (classification.kind === 'backchannel') {
+          // Only meaningful if a turn is still in flight. After a rapid series
+          // of interruptions there may be nothing left to resume, and telling
+          // the client to resume silence strands the call in 'speaking'.
+          const resumable = session.controller !== null || session.pendingTurnId !== null;
+          if (!resumable) {
+            backToListening('backchannel with no turn in flight');
+            socket.emit('turn:timeline', {
+              kind: 'backchannel',
+              marks: timeline.snapshot(),
+              total: timeline.total,
+            });
+            return;
+          }
+
           // Not an interruption — pick up exactly where playback paused.
           socket.emit('playback:resume', { turnId: interruptedTurnId });
           setState('speaking');
@@ -436,7 +507,19 @@ io.on('connection', (socket: Socket) => {
 
   /** Every chunk for a turn has finished playing — the turn is now history. */
   socket.on('playback:complete', (data: { turnId: number }) => {
-    if (data?.turnId !== session.pendingTurnId) return;
+    if (data?.turnId !== session.pendingTurnId) {
+      // Stale or unknown turn — usually a turn that was interrupted after its
+      // audio was queued. Dropping it silently used to leave the call wedged,
+      // because nothing else would ever move it back to listening.
+      note('stale playback:complete', {
+        received: data?.turnId,
+        pending: session.pendingTurnId,
+      });
+      if (session.controller === null && session.pendingTurnId === null) {
+        backToListening('stale playback:complete with nothing in flight');
+      }
+      return;
+    }
 
     if (session.pendingText) {
       session.conversation.commitComplete(data.turnId, session.pendingText);
@@ -454,7 +537,27 @@ io.on('connection', (socket: Socket) => {
     setState('ended');
   });
 
+  /**
+   * Backstop for the state machine.
+   *
+   * Rapid interruptions can abandon a turn with no successor — the aborted
+   * generation returns silently, the client has dropped its queued audio, and
+   * nobody is left to move the call on. Rather than enumerate every such race,
+   * recover from any busy state that has stopped making progress.
+   */
+  const watchdog = setInterval(() => {
+    const busy =
+      session.state === 'thinking' || session.state === 'speaking' || session.state === 'paused';
+    if (!busy) return;
+    if (session.controller !== null) return; // generation genuinely in flight
+    if (Date.now() - lastProgressAt < STUCK_TIMEOUT_MS) return;
+
+    console.warn(`⚠️  watchdog: stuck in '${session.state}' — returning to listening`);
+    backToListening('watchdog');
+  }, 2000);
+
   socket.on('disconnect', () => {
+    clearInterval(watchdog);
     abortActiveTurn('client disconnected');
     console.log(`🔌 Client disconnected: ${socket.id}`);
   });

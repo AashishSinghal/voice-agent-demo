@@ -65,5 +65,22 @@ check('full text committed', c3.history()[1].content, 'Hello there. How can I he
 check('not flagged interrupted', c3.history()[1].interrupted, undefined);
 check('no stale unspoken', c3.lastUnspoken(), null);
 
+console.log('\n--- abandoned turn is salvaged, not lost ---');
+const c4 = new Conversation();
+c4.addUserTurn('explain closures');
+c4.trackChunk(5, 'A closure is a function bundled with its scope.');
+c4.trackChunk(5, 'It remembers the variables around it.');
+check('has pending', c4.hasPending(), true);
+const salvaged = c4.commitPendingAsInterrupted();
+check(
+  'salvaged text',
+  salvaged,
+  'A closure is a function bundled with its scope. It remembers the variables around it.'
+);
+check('recorded in history', c4.history().length, 2);
+check('flagged interrupted', c4.history()[1].interrupted, true);
+check('pending cleared', c4.hasPending(), false);
+check('salvaging nothing is safe', new Conversation().commitPendingAsInterrupted(), '');
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

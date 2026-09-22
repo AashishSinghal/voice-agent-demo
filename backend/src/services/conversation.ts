@@ -78,6 +78,24 @@ export class Conversation {
     return spoken;
   }
 
+  /** Is there an assistant turn part-spoken and not yet committed? */
+  hasPending(turnId?: number): boolean {
+    if (this.pendingTurnId === null) return false;
+    if (turnId !== undefined && this.pendingTurnId !== turnId) return false;
+    return this.pendingChunks.length > 0;
+  }
+
+  /**
+   * Commit whatever is in flight as interrupted, assuming everything emitted
+   * was heard. Used when a turn is abandoned without the client reporting how
+   * much it played — losing the turn entirely is worse, because the agent then
+   * has no record of a topic it demonstrably started explaining.
+   */
+  commitPendingAsInterrupted(): string {
+    if (this.pendingTurnId === null) return '';
+    return this.commitInterrupted(this.pendingTurnId, this.pendingChunks.length);
+  }
+
   /** What the agent was about to say when it was cut off, if anything. */
   lastUnspoken(): string | null {
     for (let i = this.turns.length - 1; i >= 0; i--) {

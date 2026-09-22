@@ -10,6 +10,7 @@ import Orb from './Orb';
 import Transcript from './Transcript';
 import DebugPanel from './DebugPanel';
 import { toast } from 'sonner';
+import { diag } from '../../lib/diagnostics';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
 
@@ -245,8 +246,25 @@ const VoiceAgent = () => {
   });
 
   const handleStart = useCallback(async () => {
+    diag.reset();
     const micStream = await acquire();
     if (!micStream) return;
+
+    // Audio problems are usually environmental, so record the environment.
+    const track = micStream.getAudioTracks()[0];
+    diag.setMeta({
+      userAgent: navigator.userAgent,
+      serverUrl: SERVER_URL,
+      micLabel: track?.label ?? 'unknown',
+      micSettings: track?.getSettings?.() ?? {},
+      speechFactor: SPEECH_FACTOR,
+      silenceFactor: SILENCE_FACTOR,
+      endpointMs: ENDPOINT_MS,
+      endpointOverSpeechMs: ENDPOINT_OVER_SPEECH_MS,
+      maxTurnMs: MAX_TURN_MS,
+      idleRecycleMs: IDLE_RECYCLE_MS,
+    });
+    diag.log('client', 'call started');
     setIsCallActive(true);
     startCall();
   }, [acquire, startCall]);

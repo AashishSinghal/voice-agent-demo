@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { diag } from '../lib/diagnostics';
 
 interface UseVADOptions {
   /** Silence long enough to treat the caller's turn as finished. */
@@ -126,6 +127,7 @@ export const useVoiceActivityDetection = (
     levelRef.current = rms;
     if (rms > peakRef.current) peakRef.current = rms;
     updateNoiseFloor(rms);
+    diag.logLevel(rms, calibrationRef.current);
 
     const { speechThreshold, silenceThreshold } = calibrationRef.current;
     const tuning = tuningRef.current;
@@ -136,10 +138,11 @@ export const useVoiceActivityDetection = (
 
       if (!speakingRef.current && Date.now() - speechSinceRef.current >= tuning.speechDuration) {
         speakingRef.current = true;
-        console.log(
-          `[VAD] speech start — rms ${rms.toFixed(4)} over ${speechThreshold.toFixed(4)} ` +
-            `(floor ${calibrationRef.current.noiseFloor.toFixed(4)})`
-        );
+        diag.log('vad', 'speech start', {
+          rms: Number(rms.toFixed(4)),
+          threshold: Number(speechThreshold.toFixed(4)),
+          floor: Number(calibrationRef.current.noiseFloor.toFixed(4)),
+        });
         startRef.current?.();
       }
     } else {
@@ -155,7 +158,7 @@ export const useVoiceActivityDetection = (
           // ever arm a new timer.
           silenceTimerRef.current = null;
           speakingRef.current = false;
-          console.log(`[VAD] speech end (${windowMs}ms silence)`);
+          diag.log('vad', 'speech end', { silenceWindowMs: windowMs });
           endRef.current?.();
         }, windowMs);
       }
@@ -183,7 +186,7 @@ export const useVoiceActivityDetection = (
     floorSamplesRef.current = [];
     lastFloorSampleRef.current = 0;
 
-    console.log('[VAD] started — calibrating noise floor from the room');
+    diag.log('vad', 'started', { fftSize: analyser.fftSize });
     check();
 
     return () => {
@@ -194,7 +197,7 @@ export const useVoiceActivityDetection = (
       analyserRef.current = null;
       levelRef.current = 0;
       if (audioContext.state !== 'closed') audioContext.close();
-      console.log('[VAD] stopped');
+      diag.log('vad', 'stopped');
     };
   }, [audioStream, enabled, check]);
 
