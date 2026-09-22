@@ -94,7 +94,10 @@ async function* streamFromGroq(
   }
 
   const groq = new Groq({ apiKey });
-  const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+  // Groq's free tier dropped the Llama models in 2026; gpt-oss-20b is the
+  // fastest of the current free chat models, which matters for voice latency.
+  // Current list: https://console.groq.com/docs/models
+  const model = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
 
   const stream = await groq.chat.completions.create(
     {
