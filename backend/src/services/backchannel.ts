@@ -37,6 +37,34 @@ function normalise(text: string): string {
     .trim();
 }
 
+/**
+ * Strings Whisper emits when handed silence or noise rather than speech.
+ *
+ * Large Whisper models are trained on subtitled video and fall back on caption
+ * boilerplate when there is nothing to transcribe. Fed a few seconds of room
+ * tone they will confidently return "Thank you." — which then becomes a real
+ * conversational turn and derails the call. Recognising the artefact is far
+ * cheaper than trying to stop the model producing it.
+ */
+const HALLUCINATIONS = new Set([
+  'thank you', 'thanks', 'thank you very much', 'thanks for watching',
+  'thank you for watching', 'thanks for watching!', 'please subscribe',
+  'subscribe', 'you', 'bye', 'bye bye', 'okay bye', 'the end',
+  'silence', 'music', 'applause', 'beep', 'blank_audio',
+]);
+
+/**
+ * True if the transcript looks like a silence artefact rather than speech.
+ * Only applied to short clips: someone genuinely saying "thank you" mid
+ * conversation says it inside a longer utterance.
+ */
+export function looksHallucinated(text: string, spokenMs: number): boolean {
+  const normalised = normalise(text);
+  if (!normalised) return true;
+  if (spokenMs > 1500) return false;
+  return HALLUCINATIONS.has(normalised);
+}
+
 export interface UtteranceClassification {
   kind: 'backchannel' | 'resume' | 'interruption';
   normalised: string;

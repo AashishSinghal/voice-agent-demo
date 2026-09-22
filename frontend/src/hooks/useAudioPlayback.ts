@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { diag } from '../lib/diagnostics';
 
 interface QueuedChunk {
   turnId: number;
@@ -9,6 +10,8 @@ interface QueuedChunk {
 interface UseAudioPlaybackOptions {
   /** Every chunk of a finished turn has played out. */
   onTurnPlayed?: (turnId: number) => void;
+  /** The browser refused to play audio — usually an autoplay restriction. */
+  onBlocked?: (error: DOMException) => void;
 }
 
 /**
@@ -22,7 +25,10 @@ interface UseAudioPlaybackOptions {
  *  - `chunksPlayed` is reported upward so the server can truncate history to
  *    what the caller actually heard.
  */
-export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {}) => {
+export const useAudioPlayback = ({
+  onTurnPlayed,
+  onBlocked,
+}: UseAudioPlaybackOptions = {}) => {
   const queueRef = useRef<QueuedChunk[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const urlRef = useRef<string | null>(null);
@@ -35,9 +41,11 @@ export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {})
   const [isPlaying, setIsPlaying] = useState(false);
 
   const onTurnPlayedRef = useRef(onTurnPlayed);
+  const onBlockedRef = useRef(onBlocked);
   useEffect(() => {
     onTurnPlayedRef.current = onTurnPlayed;
-  }, [onTurnPlayed]);
+    onBlockedRef.current = onBlocked;
+  }, [onTurnPlayed, onBlocked]);
 
   const releaseCurrent = useCallback(() => {
     if (audioRef.current) {
@@ -53,7 +61,13 @@ export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {})
   }, []);
 
   const playNext = useCallback(() => {
-    if (pausedRef.current) return;
+    if (pausedRef.current) {
+      diag.log('audio', 'play skipped', {
+        reason: 'paused',
+        queued: queueRef.current.length,
+      });
+      return;
+    }
 
     const next = queueRef.current.shift();
 
@@ -79,26 +93,76 @@ export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {})
     audioRef.current = audio;
     activeTurnRef.current = next.turnId;
 
+    const startedAt = performance.now();
+
+    audio.onloadedmetadata = () => {
+      // A duration of 0 or NaN means the browser could not decode the WAV at
+      // all — a very different failure from "it played but you heard nothing".
+      diag.log('audio', 'chunk decoded', {
+        turnId: next.turnId,
+        index: next.index,
+        durationSec: Number.isFinite(audio.duration) ? Number(audio.duration.toFixed(2)) : null,
+        readyState: audio.readyState,
+      });
+    };
+
     audio.onended = () => {
+      diag.log('audio', 'chunk ended', {
+        turnId: next.turnId,
+        index: next.index,
+        playedMs: Math.round(performance.now() - startedAt),
+      });
       chunksPlayedRef.current += 1;
       playNext();
     };
+
     audio.onerror = () => {
-      console.error('[PLAYBACK] chunk failed, skipping');
+      diag.log('audio', 'chunk error', {
+        turnId: next.turnId,
+        index: next.index,
+        code: audio.error?.code ?? null,
+        message: audio.error?.message ?? null,
+      });
       chunksPlayedRef.current += 1;
       playNext();
     };
 
     playingRef.current = true;
     setIsPlaying(true);
-    audio.play().catch((err) => {
-      console.error('[PLAYBACK] play() rejected:', err);
+
+    diag.log('audio', 'chunk play start', {
+      turnId: next.turnId,
+      index: next.index,
+      bytes: next.audio.byteLength,
+      volume: audio.volume,
+      muted: audio.muted,
+    });
+
+    audio.play().catch((err: DOMException) => {
+      // NotAllowedError here means the browser blocked playback for want of a
+      // user gesture — the single most common reason for "I can see the text
+      // but hear nothing".
+      diag.log('audio', 'play() rejected', {
+        turnId: next.turnId,
+        index: next.index,
+        name: err?.name,
+        message: err?.message,
+      });
+      onBlockedRef.current?.(err);
       playNext();
     });
   }, [releaseCurrent]);
 
   const enqueue = useCallback(
     (chunk: QueuedChunk) => {
+      diag.log('audio', 'chunk queued', {
+        turnId: chunk.turnId,
+        index: chunk.index,
+        bytes: chunk.audio.byteLength,
+        queued: queueRef.current.length,
+        playing: playingRef.current,
+        paused: pausedRef.current,
+      });
       // A new turn resets the spoken counter.
       if (activeTurnRef.current !== null && chunk.turnId !== activeTurnRef.current) {
         chunksPlayedRef.current = 0;
@@ -110,6 +174,12 @@ export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {})
   );
 
   const markTurnComplete = useCallback((turnId: number) => {
+    diag.log('audio', 'turn marked complete', {
+      turnId,
+      queued: queueRef.current.length,
+      playing: playingRef.current,
+      paused: pausedRef.current,
+    });
     completedTurnRef.current = turnId;
     if (!playingRef.current && !pausedRef.current && queueRef.current.length === 0) {
       activeTurnRef.current = null;
@@ -120,6 +190,7 @@ export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {})
 
   /** Hold playback mid-turn without losing queued audio. */
   const pause = useCallback(() => {
+    diag.log('audio', 'playback paused', { queued: queueRef.current.length });
     pausedRef.current = true;
     audioRef.current?.pause();
     setIsPlaying(false);
@@ -127,6 +198,10 @@ export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {})
 
   /** Carry on from exactly where `pause` stopped. */
   const resume = useCallback(() => {
+    diag.log('audio', 'playback resume requested', {
+      wasPaused: pausedRef.current,
+      queued: queueRef.current.length,
+    });
     if (!pausedRef.current) return;
     pausedRef.current = false;
 
@@ -140,6 +215,10 @@ export const useAudioPlayback = ({ onTurnPlayed }: UseAudioPlaybackOptions = {})
 
   /** Drop everything — a confirmed interruption. */
   const stop = useCallback(() => {
+    diag.log('audio', 'playback stopped', {
+      dropped: queueRef.current.length,
+      wasPaused: pausedRef.current,
+    });
     queueRef.current = [];
     completedTurnRef.current = null;
     activeTurnRef.current = null;

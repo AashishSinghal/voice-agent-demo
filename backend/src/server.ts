@@ -11,7 +11,7 @@ import * as whisperService from './services/whisperService.js';
 import * as tts from './services/ttsService.js';
 import * as llm from './services/llmService.js';
 import { SentenceChunker } from './services/sentenceChunker.js';
-import { classifyUtterance } from './services/backchannel.js';
+import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
 import { Conversation } from './services/conversation.js';
 import { Timeline } from './services/timeline.js';
 import type { CallState, TurnMetrics } from './models/types.js';
@@ -396,6 +396,8 @@ io.on('connection', (socket: Socket) => {
       duringPlayback?: boolean;
       spokenChunks?: number;
       trimStartMs?: number;
+      /** How long the caller was actually above the speech threshold. */
+      spokenMs?: number;
     }) => {
       try {
         if (!data?.audio) return;
@@ -405,7 +407,13 @@ io.on('connection', (socket: Socket) => {
           setState('thinking');
 
           const result = await transcribe(data.audio, timeline, data.trimStartMs ?? 0);
-          if (!result) {
+
+          if (!result || looksHallucinated(result.text, data.spokenMs ?? 0)) {
+            note('discarded transcript', {
+              text: result?.text ?? null,
+              spokenMs: data.spokenMs ?? 0,
+              reason: result ? 'looks like a silence artefact' : 'nothing heard',
+            });
             setState('listening');
             socket.emit('ready:listening', { turnId: session.turnId });
             return;
@@ -429,7 +437,19 @@ io.on('connection', (socket: Socket) => {
         const timeline = new Timeline();
 
         const result = await transcribe(data.audio, timeline, data.trimStartMs ?? 0);
-        const classification = classifyUtterance(result?.text ?? '');
+
+        // Silence artefacts must never stop the agent mid-sentence.
+        const hallucinated = looksHallucinated(result?.text ?? '', data.spokenMs ?? 0);
+        if (hallucinated) {
+          note('discarded over-speech', {
+            text: result?.text ?? null,
+            spokenMs: data.spokenMs ?? 0,
+          });
+        }
+
+        const classification = hallucinated
+          ? ({ kind: 'backchannel', normalised: '' } as const)
+          : classifyUtterance(result?.text ?? '');
         timeline.mark(`classified ${classification.kind}`);
 
         console.log(
@@ -443,7 +463,7 @@ io.on('connection', (socket: Socket) => {
 
         // The caller said something either way — it belongs in the transcript,
         // marked so a backchannel is not mistaken for a real question.
-        if (result?.text) {
+        if (result?.text && !hallucinated) {
           socket.emit('transcription:complete', {
             text: result.text,
             overSpeech: true,

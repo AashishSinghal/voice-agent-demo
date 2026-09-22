@@ -1,5 +1,5 @@
 import { Conversation } from './services/conversation.js';
-import { classifyUtterance } from './services/backchannel.js';
+import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -81,6 +81,23 @@ check('recorded in history', c4.history().length, 2);
 check('flagged interrupted', c4.history()[1].interrupted, true);
 check('pending cleared', c4.hasPending(), false);
 check('salvaging nothing is safe', new Conversation().commitPendingAsInterrupted(), '');
+
+console.log('\n--- whisper silence artefacts are rejected ---');
+for (const [text, spokenMs, expected] of [
+  ['Thank you.', 200, true],
+  ['thank you', 0, true],
+  ['Thanks for watching!', 300, true],
+  ['you', 150, true],
+  ['', 0, true],
+  // a long enough utterance is taken at face value, even if it matches
+  ['Thank you.', 2000, false],
+  // real speech is never rejected
+  ['explain software engineering', 900, false],
+  ['what about closures', 400, false],
+] as const) {
+  check(`"${text}" @${spokenMs}ms -> ${expected ? 'reject' : 'keep'}`,
+    looksHallucinated(text, spokenMs), expected);
+}
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

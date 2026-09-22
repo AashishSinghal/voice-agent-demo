@@ -60,6 +60,10 @@ export const useVoiceActivityDetection = (
   const speakingRef = useRef(false);
   const levelRef = useRef(0);
   const peakRef = useRef(0);
+  /** Last moment the level was above the speech threshold. Combined with the
+   *  onset this gives how long the caller was actually audible, which is what
+   *  separates a real utterance from a clip of room tone. */
+  const lastVoiceAtRef = useRef(0);
 
   const floorSamplesRef = useRef<number[]>([]);
   const lastFloorSampleRef = useRef(0);
@@ -134,6 +138,7 @@ export const useVoiceActivityDetection = (
 
     // --- sustained speech -> onSpeechStart ---
     if (rms >= speechThreshold) {
+      lastVoiceAtRef.current = Date.now();
       if (speechSinceRef.current === null) speechSinceRef.current = Date.now();
 
       if (!speakingRef.current && Date.now() - speechSinceRef.current >= tuning.speechDuration) {
@@ -201,5 +206,5 @@ export const useVoiceActivityDetection = (
     };
   }, [audioStream, enabled, check]);
 
-  return { levelRef, peakRef, calibrationRef };
+  return { levelRef, peakRef, calibrationRef, lastVoiceAtRef };
 };

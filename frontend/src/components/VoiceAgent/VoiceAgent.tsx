@@ -41,6 +41,16 @@ const IDLE_RECYCLE_MS = 10_000;
 const PREROLL_MS = 700;
 
 /**
+ * Minimum audible speech before a clip is worth transcribing.
+ *
+ * Whisper does not return nothing when handed near-silence — it returns
+ * caption boilerplate ("Thank you."), which then becomes a conversational turn
+ * and derails the call. Not sending the clip is the cheap half of the fix; the
+ * server rejects the artefact as the other half.
+ */
+const MIN_SPOKEN_MS = 300;
+
+/**
  * How long a pause has to last before the caller is considered finished.
  *
  * A normal turn can afford to wait — cutting someone off mid-thought is worse
@@ -100,6 +110,8 @@ const VoiceAgent = () => {
   /** When the current recording began, and when speech within it began. */
   const recordingStartedAtRef = useRef(0);
   const speechStartedAtRef = useRef(0);
+  /** How long the caller was actually audible in this recording. */
+  const spokenMsRef = useRef(0);
 
   const notifyCompleteRef = useRef<(turnId: number) => void>(() => {});
 
@@ -128,6 +140,10 @@ const VoiceAgent = () => {
       playback.stop();
     },
     onReadyToListen: () => {
+      // Control is back with the caller, so nothing is mid-playback. Clearing
+      // here matters: a pause with no matching resume would otherwise leave
+      // the queue permanently blocked and every later turn silent.
+      playback.stop();
       playback.resetCounter();
     },
   });
@@ -148,6 +164,7 @@ const VoiceAgent = () => {
       duringPlayback: bargeRef.current,
       spokenChunks: spokenAtBargeRef.current,
       trimStartMs,
+      spokenMs: spokenMsRef.current,
     });
   });
 
@@ -250,8 +267,28 @@ const VoiceAgent = () => {
       trace('speech end ignored', 'no speech captured yet');
       return;
     }
+    // How much of this recording was actually audible speech. Speech-end
+    // fires one endpoint window after the caller fell quiet, so subtracting it
+    // gives the span that was genuinely audible.
+    const endpointWindow =
+      stateRef.current === 'paused' ? ENDPOINT_OVER_SPEECH_MS : ENDPOINT_MS;
+    const spokenMs = Math.max(
+      0,
+      Math.round(Date.now() - endpointWindow - speechStartedAtRef.current)
+    );
+    spokenMsRef.current = spokenMs;
+
     sawSpeechRef.current = false;
     setUserSpeaking(false);
+
+    if (spokenMs < MIN_SPOKEN_MS) {
+      // Too brief to be speech — a cough, a door, a burst of noise. Sending it
+      // invites a hallucinated transcript, so recycle instead.
+      trace('discarded utterance', `only ${spokenMs}ms audible`);
+      recorder.discardRecording();
+      return;
+    }
+
     markTimeline('caller stopped');
     trace('speech end', bargeRef.current ? 'sending over-speech' : 'sending turn');
 

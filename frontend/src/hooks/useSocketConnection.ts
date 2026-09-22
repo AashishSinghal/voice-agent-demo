@@ -228,7 +228,12 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
   const sendAudio = useCallback(
     (
       blob: Blob,
-      opts: { duringPlayback: boolean; spokenChunks: number; trimStartMs: number }
+      opts: {
+        duringPlayback: boolean;
+        spokenChunks: number;
+        trimStartMs: number;
+        spokenMs: number;
+      }
     ) => {
       if (!socketRef.current?.connected) return;
       diag.log('socket-out', 'audio:input', {
@@ -236,6 +241,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
         duringPlayback: opts.duringPlayback,
         spokenChunks: opts.spokenChunks,
         trimStartMs: opts.trimStartMs,
+        spokenMs: opts.spokenMs,
       });
       blob.arrayBuffer().then((audio) =>
         socketRef.current?.emit('audio:input', {
@@ -243,6 +249,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
           duringPlayback: opts.duringPlayback,
           spokenChunks: opts.spokenChunks,
           trimStartMs: opts.trimStartMs,
+          spokenMs: opts.spokenMs,
         })
       );
     },
