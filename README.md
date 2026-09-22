@@ -1,78 +1,121 @@
 # Voice Agent
 
-A general-purpose, interruptible voice agent. Speech in, speech out, over a
+An interruptible, general-purpose voice agent. Speech in, speech out, over a
 WebSocket.
 
-The design goal is that **the conversation holds up even when the model is
-weak**. Almost everything that makes this feel responsive lives in the
-infrastructure around the model, not in the model itself.
+The premise: **a voice conversation lives or dies on the infrastructure around
+the model, not the model itself.** A weak model that lets you interrupt it,
+knows what you actually heard, and can pick up a dropped thread feels better to
+talk to than a strong one that talks over you. Everything here is built to hold
+up with a small, cheap model behind it.
 
-```
-mic ──> VAD ──> Whisper (Groq) ──> LLM (Groq or Ollama, streaming)
-                                        │
-                                        ├─ sentence 1 ──> TTS ──> audio chunk ──> speaker
-                                        ├─ sentence 2 ──> TTS ──> audio chunk ──> speaker
-                                        └─ ...
-```
+<!-- Drop a screen recording of a call here — an interruption mid-sentence is
+     the thing worth showing. ![demo](docs/demo.gif) -->
 
-## What the infrastructure does
+---
+
+## What it does
 
 **Streams by sentence.** Audio for sentence one is synthesised and playing while
-the model is still writing sentence three, so the caller hears a reply almost
-immediately rather than after the full response.
+the model is still writing sentence three. First audio lands in well under a
+second instead of after the full response.
 
-**Tells a backchannel from an interruption.** Saying "mhm" or "yeah" while the
-agent talks does not stop it — playback pauses, the utterance is transcribed and
-classified, and if it was only an acknowledgement playback resumes from exactly
-where it stopped. A real question stops the agent immediately.
+**Tells a backchannel from an interruption.** Saying "mhm" while the agent talks
+doesn't stop it — playback pauses, the utterance is transcribed and classified,
+and if it was only an acknowledgement playback resumes from exactly where it
+stopped. A real question stops the agent immediately.
 
-**Keeps history honest about what was heard.** When the caller does interrupt,
-the agent has usually generated more than it managed to say. Only the sentences
-that actually finished playing go into the conversation history, flagged as
-interrupted — so the model never refers back to something the caller never
-heard. The unsaid remainder is kept separately, so "go on" can pick up where it
-left off.
+**Keeps history honest about what was heard.** When you do interrupt, the agent
+has usually generated more than it managed to say. Only the sentences that
+actually finished playing go into history, flagged as interrupted. The model
+never refers back to something you never heard — and the unsaid remainder is
+kept, so "go back to what you were explaining" produces a continuation rather
+than a blank look.
 
-**Fails softly.** Per-stage timeouts mean a hung transcription cannot wedge the
-call; the turn is abandoned and the agent goes back to listening.
+**Recovers from its own mistakes.** Per-stage timeouts, a watchdog for a call
+that stops making progress, an adaptive noise gate calibrated to your
+microphone, and a filter for the caption boilerplate Whisper emits when handed
+silence.
 
-None of this requires a capable model. Swap in a small local one and the
-conversation still behaves.
+---
+
+## How a turn works
+
+```mermaid
+flowchart LR
+    MIC[microphone<br/>always recording] --> VAD[adaptive<br/>noise gate]
+    VAD -->|speech onset| TRIM[trim to onset<br/>ffmpeg]
+    TRIM --> STT[Whisper<br/>Groq]
+    STT --> LLM[LLM<br/>streaming]
+    LLM -->|token stream| CHUNK[sentence<br/>chunker]
+    CHUNK -->|sentence 1| TTS1[TTS] --> SPK[speaker]
+    CHUNK -->|sentence 2| TTS2[TTS] --> SPK
+    CHUNK -->|sentence n| TTS3[TTS] --> SPK
+```
+
+The microphone records for the entire call rather than starting when speech is
+detected — detection needs ~250ms of sustained sound to be confident, and by
+then the first word is already spoken. Recording continuously means the onset is
+always captured; the server trims back to it.
+
+## How an interruption works
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant B as Browser
+    participant S as Server
+
+    Note over B: agent is speaking
+    C->>B: starts talking
+    B->>B: pause playback (~250ms)
+    B->>S: barge:detected (chunks played)
+    C->>B: stops talking
+    B->>S: audio:input (trimmed to onset)
+    S->>S: transcribe, then classify
+
+    alt backchannel ("mhm")
+        S->>B: playback:resume
+        Note over B: continues from the pause point
+    else real interruption
+        S->>S: commit only the sentences that played
+        S->>B: turn:interrupted
+        Note over B: drops queued audio, new turn begins
+    end
+```
+
+The agent goes quiet in about 250ms, because pausing doesn't wait for the
+transcript. The *decision* costs longer, because classifying needs words and
+words need you to stop talking — see the latency budget below.
+
+---
 
 ## Running locally
 
 ### 1. Get a Groq API key (free, ~2 minutes)
 
-1. Go to **https://console.groq.com** and sign in with Google or GitHub.
-2. Open **API Keys** → **Create API Key**, name it anything, copy the value.
-3. You only see it once — paste it somewhere before closing the dialog.
+1. Go to **https://console.groq.com**, sign in with Google or GitHub.
+2. **API Keys** → **Create API Key**, copy the value — you only see it once.
 
-No credit card, no billing setup. The free tier covers this comfortably:
-8 hours/day of Whisper transcription and 1,000 LLM requests/day.
-
-This one key covers both speech-to-text and the LLM.
+No credit card. One key covers both speech-to-text and the LLM. The free tier
+gives 8 hours/day of Whisper and 1,000 LLM requests/day.
 
 ### 2. Backend
 
 ```bash
 cd backend
 npm install
-cp .env.example .env          # then paste your key into GROQ_API_KEY
+cp .env.example .env          # paste your key into GROQ_API_KEY
 npm run dev
 ```
-
-Check it came up:
 
 ```bash
 curl -s localhost:3000/health
 ```
 
-`"groq": "configured"` means the key was picked up. If it says
-`missing (set GROQ_API_KEY)`, the placeholder is still in `.env`.
+`"groqKey": "configured"` means the key was picked up.
 
 ### 3. Frontend
-
-In a second terminal:
 
 ```bash
 cd frontend
@@ -80,46 +123,39 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173, click **Start Call**, and allow microphone access.
-The browser will only grant the mic on `localhost` or over HTTPS.
+Open http://localhost:5173, click **Start talking**, allow microphone access.
+The browser only grants a mic on `localhost` or over HTTPS.
 
-### 4. Try it
+### 4. Try to break it
 
-- Ask it anything — it is a general assistant by default.
-- **Say "mhm" while it talks** — it keeps going.
-- **Ask a real question while it talks** — it stops mid-sentence.
-- **Then say "go on"** — it resumes from what it never got to say.
+- Ask it something, then **talk over it** — it stops mid-sentence.
+- Say **"mhm"** while it talks — it keeps going.
+- Interrupt, change the subject, then ask it to **go back** — it continues the
+  thread it was cut off from.
 
-Open **debug** (top right) for live call state, per-stage latency, and the
-event log showing each interruption being classified.
+Open **debug** (top right) for live call state, microphone level against the
+calibrated thresholds, per-stage latency, a reaction benchmark, and an
+exportable diagnostic log.
+
+---
 
 ## Latency budget
 
-Interruption handling is a pipeline, and the caller feels the sum of it. The
+Interruption handling is a pipeline and the caller feels the sum of it. The
 debug panel measures each stage live; these are the fixed costs.
 
 | Stage | Cost | Notes |
 |---|---|---|
-| Detect the caller's voice | **250 ms** | `speechDuration` — sustained sound before we believe it's speech. Lower it and a cough stops the agent. |
-| Pause playback | ~0 ms | Local; the agent goes quiet almost immediately. |
-| Wait for the caller to finish | **450 ms** over-speech / **900 ms** normal turn | `ENDPOINT_OVER_SPEECH_MS` / `ENDPOINT_MS`. The single largest controllable cost. |
-| Upload + convert audio | ~100-150 ms | ffmpeg webm → 16 kHz wav. |
-| Transcribe | **300-500 ms** | Groq Whisper. Network-bound. |
+| Detect the caller's voice | 250 ms | Sustained sound before we believe it's speech. Lower it and a cough stops the agent. |
+| Pause playback | ~0 ms | Local. The agent goes quiet almost immediately. |
+| Wait for the caller to finish | 450 ms over-speech / 900 ms normal turn | The largest controllable cost. |
+| Upload + convert audio | 100–150 ms | ffmpeg webm → 16 kHz wav. |
+| Transcribe | 300–500 ms | Groq Whisper. Network-bound. |
 | Classify | <5 ms | A set lookup, deliberately not a model call. |
 
-**The agent stops talking after ~250 ms** — that part feels instant, because
-pausing does not wait for the transcript.
-
-**The decision costs ~900-1100 ms** on top, because classifying over-speech
-needs the words, and the words need the caller to stop. That is the number to
-watch in the benchmark panel.
-
-Two thresholds are deliberately different: over-speech uses a much tighter
-endpointing window (450 ms) than a normal turn (900 ms). While the agent is
-paused every millisecond is dead air, and backchannels are short by nature, so
-waiting a full turn-length pause to recognise "mhm" is wasted time.
-
-### Targets
+Over-speech deliberately uses a tighter endpointing window than a normal turn:
+while the agent is paused every millisecond is dead air, and backchannels are
+short by nature.
 
 | Measure | Good | Acceptable | Broken |
 |---|---|---|---|
@@ -127,62 +163,33 @@ waiting a full turn-length pause to recognise "mhm" is wasted time.
 | Resume after a backchannel | <800 ms | <1200 ms | >1500 ms |
 | First audio of a reply | <900 ms | <1500 ms | >2500 ms |
 
-If the decision time is consistently over ~1.2 s, the endpointing window is the
-first thing to cut — not the model.
+If the decision time is consistently over ~1.2s, cut the endpointing window
+first — not the model.
+
+---
 
 ## Configuration
 
-Everything is provider-pluggable so the same code runs locally and deployed.
+Every provider is pluggable, so the same code runs locally and deployed.
 
 | Variable | Options | Default | Notes |
 |---|---|---|---|
-| `LLM_PROVIDER` | `groq`, `ollama` | `groq` | `groq` needs no local model. `ollama` is fully offline but needs Ollama running and `ollama pull phi3`. |
+| `LLM_PROVIDER` | `groq`, `ollama` | `groq` | `ollama` is fully offline but needs Ollama running. |
 | `GROQ_MODEL` | any free chat model | `openai/gpt-oss-20b` | Groq dropped Llama from the free tier in 2026. [Current list](https://console.groq.com/docs/models). |
 | `TTS_PROVIDER` | `say`, `piper` | `piper` | `.env.example` sets `say` for local dev — see below. |
-| `SAY_VOICE` | any macOS voice | `Samantha` | `say -v '?'` lists them. |
 | `AGENT_PERSONA` | any prompt | general assistant | Repurpose the agent without touching code. |
 | `AGENT_GREETING` | any text | "Hey, I'm listening…" | First thing it says. |
 
 ### Why `say` locally and Piper in deployment
 
 The `piper-tts` macOS arm64 wheel (1.8.0) ships an espeak-ng data path pointing
-at its own CI build machine, so it cannot synthesise anything on a Mac —
-`initialize()` is given the correct bundled directory and the native bridge
-ignores it. The Linux wheel used in the container is unaffected.
+at its own CI build machine, so it cannot synthesise anything on a Mac — the
+native bridge ignores the data directory it is given. The Linux wheel used in
+the container is unaffected. Local development therefore uses macOS's built-in
+`say` (no setup, no 60 MB model download) and deployment uses Piper. It is one
+environment variable; the call site is identical.
 
-So local development uses macOS's built-in `say` (zero setup, no 60 MB model
-download), and deployment uses Piper. The provider is a single env var; the
-call site in `ttsService.ts` is identical either way.
-
-To run fully offline on a Mac you would need a working Piper — otherwise use
-`LLM_PROVIDER=ollama` with `TTS_PROVIDER=say`, which keeps the LLM local.
-
-## Deployment
-
-See [DEPLOYMENT.md](./DEPLOYMENT.md) — a $0/month setup on Render + Vercel + Groq.
-
-## Layout
-
-```
-backend/src/
-  server.ts                    socket protocol, call state, interruption triage
-  services/conversation.ts     history; truncation to what was actually heard
-  services/backchannel.ts      "mhm" vs a real interruption
-  services/sentenceChunker.ts  token stream -> speakable sentences
-  services/llmService.ts       streaming LLM, provider-agnostic, cancellable
-  services/ttsService.ts       TTS, provider-agnostic, cancellable
-  services/whisperService.ts   Groq Whisper STT
-  services/audioProcessor.ts   ffmpeg webm -> 16 kHz mono wav
-  smoke.ts                     tests for truncation + classification
-frontend/src/
-  components/VoiceAgent/Orb.tsx         state-coloured, level-reactive orb
-  components/VoiceAgent/DebugPanel.tsx  state, latency, event log
-  hooks/useMicStream.ts                 one mic stream per call
-  hooks/useVoiceActivityDetection.ts    speech start (barge-in) + speech end
-  hooks/useAudioPlayback.ts             queue with pause/resume/stop
-  hooks/useSocketConnection.ts          streaming protocol
-  hooks/useAudioRecorder.ts             records from the shared stream
-```
+---
 
 ## Tests
 
@@ -190,12 +197,75 @@ frontend/src/
 cd backend && npm test
 ```
 
-Covers the two pieces where a bug would be invisible in a demo but wrong in
-conversation: history truncation after an interruption, and backchannel
-classification.
+Covers the logic where a bug is invisible in a demo but wrong in conversation:
+history truncation after an interruption, salvaging an abandoned turn,
+backchannel classification, and the Whisper silence-artefact filter.
 
-## Requirements
+## Deployment
 
-- Node 20+
-- `ffmpeg` on PATH (`brew install ffmpeg`)
-- macOS for `TTS_PROVIDER=say`; any platform for `piper`
+See [DEPLOYMENT.md](./DEPLOYMENT.md) — a $0/month setup on Render + Vercel +
+Groq, including the free-tier cold-start trap and how to protect the quota.
+
+---
+
+## Layout
+
+```
+backend/src/
+  server.ts                    socket protocol, call state, interruption triage
+  services/conversation.ts     history; truncation to what was actually heard
+  services/backchannel.ts      "mhm" vs a real interruption; silence artefacts
+  services/sentenceChunker.ts  token stream → speakable sentences
+  services/llmService.ts       streaming LLM, provider-agnostic, cancellable
+  services/ttsService.ts       TTS, provider-agnostic, cancellable
+  services/whisperService.ts   Groq Whisper STT
+  services/audioProcessor.ts   ffmpeg webm → 16 kHz mono wav, trimmed to onset
+  services/timeline.ts         per-stage turn timings
+  smoke.ts                     tests
+
+frontend/src/
+  components/VoiceAgent/Orb.tsx         state-coloured, level-reactive orb
+  components/VoiceAgent/DebugPanel.tsx  state, mic meter, latency, event log
+  hooks/useMicStream.ts                 one mic stream per call
+  hooks/useVoiceActivityDetection.ts    adaptive noise gate, speech edges
+  hooks/useAudioPlayback.ts             queue with pause/resume/stop
+  hooks/useAudioRecorder.ts             continuous capture
+  hooks/useSocketConnection.ts          streaming protocol
+  lib/diagnostics.ts                    exportable session log
+```
+
+## Design notes
+
+**Classification is a set lookup, not a model call.** It sits on the critical
+path between the caller speaking and the agent reacting, so it has to be
+instant and predictable. A model call here would add hundreds of milliseconds
+to the one measurement that matters most.
+
+**Thresholds are measured, not hardcoded.** Microphone gain varies by an order
+of magnitude across machines; a level that is obviously speech on one laptop is
+below the noise floor on another. The noise floor is estimated as a low
+percentile of recent frames — percentiles survive someone talking through the
+calibration in a way a mean does not.
+
+**The state machine has a watchdog.** Rapid interruptions can abandon a turn
+with no successor. Rather than enumerate every such race, any busy state that
+stops making progress is recovered.
+
+**Whisper does not return nothing for silence.** It returns caption boilerplate
+— "Thank you.", "Thanks for watching!" — because it was trained on subtitled
+video. Recognising the artefact is far cheaper than trying to stop the model
+producing it.
+
+## Known limitations
+
+- Single instance, no horizontal scaling. Fine for a demo, not for production.
+- Conversation state lives in memory per socket and dies with it.
+- Interruption decisions need the full utterance, so the floor on reaction time
+  is the endpointing window plus transcription. Speculative resume — playing
+  again on silence and retracting if the transcript turns out to be a question
+  — would cut it further.
+- Requirements: Node 20+, `ffmpeg` on PATH, macOS for `TTS_PROVIDER=say`.
+
+## Licence
+
+MIT — see [LICENSE](./LICENSE).

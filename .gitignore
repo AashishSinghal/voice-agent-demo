@@ -37,10 +37,11 @@ tmp/
 temp/
 *.tmp
 
-# Model files (large binary files)
-models/whisper/*.bin
-models/piper/*.onnx
-models/piper/*.json
+# Model files (downloaded by setup, never committed).
+# Patterns containing a slash anchor to the repo root, so these need ** to
+# also cover backend/models/.
+**/models/whisper/
+**/models/piper/
 *.bin
 *.gguf
 *.onnx
