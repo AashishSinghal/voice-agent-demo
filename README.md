@@ -180,6 +180,16 @@ Every provider is pluggable, so the same code runs locally and deployed.
 | `AGENT_PERSONA` | any prompt | general assistant | Repurpose the agent without touching code. |
 | `AGENT_GREETING` | any text | "Hey, I'm listening…" | First thing it says. |
 
+### Getting a Piper voice
+
+Only needed for `TTS_PROVIDER=piper` (Docker and deployment). The ~63MB model is
+not committed — git keeps binaries in history forever and it belongs to its
+publisher — so fetch it in one command:
+
+```bash
+cd backend && npm run fetch-voice
+```
+
 ### Why `say` locally and Piper in deployment
 
 The `piper-tts` macOS arm64 wheel (1.8.0) ships an espeak-ng data path pointing

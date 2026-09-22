@@ -1,32 +1,60 @@
-# Voice Agent Frontend
+# Frontend
 
-React frontend for AI voice agent call interface.
+The call interface: a state-coloured orb, a transcript, and a debug panel with
+live microphone calibration, per-stage latency and an exportable diagnostic log.
 
-## Setup
+See the [root README](../README.md) for what the project is and how the pieces
+fit together.
 
-```bash
-pnpm install
-```
-
-## Start
+## Run
 
 ```bash
-pnpm dev
+npm install
+npm run dev     # http://localhost:5173
 ```
 
-Frontend runs on http://localhost:5173
+The backend must be running first. The browser only grants microphone access on
+`localhost` or over HTTPS.
 
-## Usage
+Point at a non-default backend with `VITE_SERVER_URL`.
 
-1. Ensure backend is running on http://localhost:3000
-2. Click "Start Call"
-3. Speak your question after the greeting
-4. Bot responds or transfers to human agent
+## Scripts
 
-## Stack
+| Command | What it does |
+|---|---|
+| `npm run dev` | Vite dev server |
+| `npm run build` | Type-check and build to `dist/` |
+| `npm run preview` | Serve the production build |
 
-- React + TypeScript
-- Vite
-- Socket.io client
-- Web Audio API (recording + VAD)
-- Zustand (state management)
+## Debugging a call
+
+Open **debug** (top right):
+
+- **Microphone** — live level against thresholds calibrated from your room. If
+  the bar never clears the green marker while you talk normally, detection is
+  the problem and nothing downstream will fire.
+- **Last turn timeline** — client and server stages merged, server rows
+  indented.
+- **Reaction benchmark** — time from hearing you to the agent acting, split by
+  interruption and backchannel.
+- **Diagnostics** — Copy or Download the whole session: client events, server
+  log lines, socket traffic both ways, and the microphone curve. Audio is
+  recorded by size only.
+
+`__diag.toText()` and `__botStore` are exposed on `window` in dev.
+
+## Layout
+
+```
+src/
+  components/VoiceAgent/Orb.tsx         state-coloured, level-reactive orb
+  components/VoiceAgent/Transcript.tsx  conversation, interruptions marked
+  components/VoiceAgent/DebugPanel.tsx  state, mic meter, latency, event log
+  hooks/useMicStream.ts                 one mic stream per call
+  hooks/useVoiceActivityDetection.ts    adaptive noise gate, speech edges
+  hooks/useAudioPlayback.ts             queue with pause/resume/stop
+  hooks/useAudioRecorder.ts             continuous capture
+  hooks/useSocketConnection.ts          streaming protocol
+  stores/useBotStateStore.ts            call state, timeline, benchmarks
+  lib/diagnostics.ts                    exportable session log
+```

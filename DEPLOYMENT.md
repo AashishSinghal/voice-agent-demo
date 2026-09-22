@@ -61,7 +61,8 @@ Without these, one bored visitor can exhaust the day's budget.
 ## Deployment steps
 
 1. **Dockerfile** for the backend — Node 20 slim, plus `ffmpeg` and the Piper
-   binary + voice model. Build for `linux/amd64`.
+   binary. Fetch the voice model during the build with
+   `npm run fetch-voice` rather than committing it. Build for `linux/amd64`.
 2. **Render** → New Web Service → point at the repo → Docker → free plan.
    Environment: `LLM_PROVIDER=groq`, `GROQ_API_KEY`, `GROQ_MODEL`,
    `CLIENT_URL=https://<your-vercel-domain>`, `PIPER_*`.
