@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Mic, PhoneOff, SlidersHorizontal } from 'lucide-react';
+import { History, Mic, PhoneOff, SlidersHorizontal } from 'lucide-react';
 import { useAudioRecorder } from '../../hooks/useAudioRecorder';
 import { useAudioPlayback } from '../../hooks/useAudioPlayback';
 import { useMicStream } from '../../hooks/useMicStream';
@@ -11,6 +11,7 @@ import Orb from './Orb';
 import Transcript from './Transcript';
 import DebugPanel from './DebugPanel';
 import Attribution from './Attribution';
+import Changelog from '../Changelog';
 import { toast } from 'sonner';
 import { diag } from '../../lib/diagnostics';
 
@@ -83,6 +84,7 @@ const CAPTION: Record<CallState, string> = {
 const VoiceAgent = () => {
   const [isCallActive, setIsCallActive] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
+  const [changelogOpen, setChangelogOpen] = useState(false);
 
   /**
    * Off by default and never uploaded. This runs on a public URL, so recording
@@ -442,12 +444,21 @@ const VoiceAgent = () => {
   return (
     <div className="relative flex h-screen flex-col bg-zinc-950 text-zinc-100">
       <header className="flex items-center justify-between px-6 py-5">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium tracking-tight text-zinc-300">Voice Agent</span>
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`}
-            title={connected ? 'Connected' : 'Disconnected'}
-          />
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium tracking-tight text-zinc-300">Voice Agent</span>
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`}
+              title={connected ? 'Connected' : 'Disconnected'}
+            />
+          </div>
+          <button
+            onClick={() => setChangelogOpen((v) => !v)}
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-zinc-500 transition hover:bg-white/5 hover:text-zinc-300"
+          >
+            <History className="h-3.5 w-3.5" />
+            what broke
+          </button>
         </div>
         <button
           onClick={() => setDebugOpen((v) => !v)}
@@ -500,6 +511,8 @@ const VoiceAgent = () => {
 
         <Attribution />
       </footer>
+
+      <Changelog open={changelogOpen} onClose={() => setChangelogOpen(false)} />
 
       <DebugPanel
         open={debugOpen}

@@ -232,6 +232,24 @@ environment variable; the call site is identical.
 
 ---
 
+## What broke, and why
+
+The interface carries its own build log — every problem, its cause, and what
+fixed it, with the numbers behind each one. It is in the header rather than
+hidden behind the debug panel, because the engineering is the interesting part
+of this project and without somewhere to read it the demo just looks like a
+voice chatbot.
+
+It lives in `frontend/src/data/changelog.ts` as structured data rather than
+prose, so the same source renders in the panel and exports to markdown:
+
+```bash
+cd frontend && npm run export:changelog > case-study.md
+```
+
+One source, so a fix recorded once cannot drift between the app and the
+write-up.
+
 ## Building evaluation data
 
 The debug panel can record a call as **two separate tracks** — the caller on
