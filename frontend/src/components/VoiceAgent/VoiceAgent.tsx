@@ -9,6 +9,7 @@ import { useBotStateStore, type CallState } from '../../stores/useBotStateStore'
 import Orb from './Orb';
 import Transcript from './Transcript';
 import DebugPanel from './DebugPanel';
+import Attribution from './Attribution';
 import { toast } from 'sonner';
 import { diag } from '../../lib/diagnostics';
 
@@ -409,7 +410,7 @@ const VoiceAgent = () => {
         </div>
       </main>
 
-      <footer className="flex items-center justify-center gap-3 px-6 py-8">
+      <footer className="flex flex-col items-center gap-5 px-6 pb-7 pt-8">
         {!isCallActive ? (
           <button
             onClick={handleStart}
@@ -428,6 +429,8 @@ const VoiceAgent = () => {
             End
           </button>
         )}
+
+        <Attribution />
       </footer>
 
       <DebugPanel
