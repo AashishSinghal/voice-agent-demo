@@ -280,7 +280,30 @@ io.on('connection', (socket: Socket) => {
     }
 
     for (const chunk of chunker.flush()) await emitChunk(chunk);
-    if (signal.aborted) return;
+
+    if (signal.aborted) {
+      // Synthesis already happened for whatever played before the caller cut
+      // in, and it was billed. Dropping the turn silently here would quietly
+      // undercount every interruption.
+      if (spokenCharacters > 0) {
+        const abandoned = cost.turnCost({
+          audioSeconds: session.clipSeconds,
+          usage: { promptTokens: 0, completionTokens: 0 },
+          spokenCharacters,
+          sttModel: process.env.GROQ_STT_MODEL || undefined,
+          llmModel: process.env.GROQ_MODEL || undefined,
+          ttsModel: process.env.GROQ_TTS_MODEL || undefined,
+        });
+        session.spend = cost.addCost(session.spend, abandoned);
+        note('interrupted turn cost', {
+          turnId,
+          totalUsd: Number(abandoned.totalUsd.toFixed(6)),
+          spokenCharacters,
+          note: 'synthesised before the caller interrupted',
+        });
+      }
+      return;
+    }
 
     const text = fullText.trim();
 
@@ -339,7 +362,22 @@ io.on('connection', (socket: Socket) => {
       stt: `${Number(turnSpend.sttUsd.toFixed(6))} (${share(turnSpend.sttUsd)})`,
       llm: `${Number(turnSpend.llmUsd.toFixed(6))} (${share(turnSpend.llmUsd)})`,
       spokenCharacters,
+      audioSeconds: turnSpend.detail.actualAudioSeconds,
       billedAudioSeconds: turnSpend.detail.billedAudioSeconds,
+    });
+
+    // The running total, so an exported log stands on its own without
+    // re-adding the turns by hand.
+    note('call cost so far', {
+      turns: session.spendTurns,
+      totalUsd: Number(session.spend.totalUsd.toFixed(6)),
+      ttsUsd: Number(session.spend.ttsUsd.toFixed(6)),
+      sttUsd: Number(session.spend.sttUsd.toFixed(6)),
+      llmUsd: Number(session.spend.llmUsd.toFixed(6)),
+      perThousandTurnsUsd:
+        session.spendTurns > 0
+          ? Number(((session.spend.totalUsd / session.spendTurns) * 1000).toFixed(2))
+          : 0,
     });
 
     const metrics: TurnMetrics = {

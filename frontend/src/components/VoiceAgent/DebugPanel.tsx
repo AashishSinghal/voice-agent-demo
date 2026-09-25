@@ -3,7 +3,10 @@ import { Check, Copy, Download, Mic, X } from 'lucide-react';
 import { useBotStateStore, median, type TimelineKind } from '../../stores/useBotStateStore';
 import type { VadCalibration } from '../../hooks/useVoiceActivityDetection';
 import { diag } from '../../lib/diagnostics';
-import type { ConversationRecording } from '../../hooks/useConversationRecorder';
+import {
+  buildManifest,
+  type ConversationRecording,
+} from '../../hooks/useConversationRecorder';
 import type { CostReport, TurnMetrics } from '../../hooks/useSocketConnection';
 
 interface DebugPanelProps {
@@ -324,11 +327,31 @@ const DebugPanel = ({
                   Agent · {kb(conversationRecording.agentBlob)}
                 </button>
               </div>
+              <button
+                onClick={() => {
+                  const names = {
+                    caller: `call-${conversationRecording.startedAt}-you.webm`,
+                    agent: `call-${conversationRecording.startedAt}-agent.webm`,
+                  };
+                  saveBlob(
+                    new Blob([JSON.stringify(buildManifest(conversationRecording, names), null, 2)], {
+                      type: 'application/json',
+                    }),
+                    `call-${conversationRecording.startedAt}-manifest.json`
+                  );
+                }}
+                className="w-full rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-400 transition hover:bg-white/5 hover:text-zinc-200"
+              >
+                Manifest · durations and alignment
+              </button>
+
               <p className="text-[11px] leading-relaxed text-zinc-600">
                 {(conversationRecording.durationMs / 1000).toFixed(1)}s. Both
                 tracks start together, so they line up with each other and with
                 the diagnostic log — which carries the transcripts and
                 classifications that turn them into labelled evaluation data.
+                WebM from a browser carries no duration in its header, which is
+                what the manifest is for.
               </p>
             </div>
           )}

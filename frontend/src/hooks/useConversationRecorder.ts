@@ -29,6 +29,61 @@ export interface ConversationRecording {
   durationMs: number;
 }
 
+/**
+ * Sidecar written beside the audio.
+ *
+ * MediaRecorder writes WebM as a live stream and never back-fills the Duration
+ * element, so `ffprobe` reports no duration and tools cannot seek without
+ * decoding the whole file. The recorder knows the length, so it writes it down
+ * rather than leaving every consumer to recover it.
+ */
+export interface RecordingManifest {
+  startedAt: string;
+  durationMs: number;
+  tracks: {
+    role: 'caller' | 'agent';
+    file: string;
+    bytes: number;
+    container: string;
+  }[];
+  note: string;
+}
+
+export function buildManifest(
+  recording: ConversationRecording,
+  names: { caller: string; agent: string }
+): RecordingManifest {
+  const tracks: RecordingManifest['tracks'] = [];
+
+  if (recording.callerBlob) {
+    tracks.push({
+      role: 'caller',
+      file: names.caller,
+      bytes: recording.callerBlob.size,
+      container: recording.callerBlob.type,
+    });
+  }
+  if (recording.agentBlob) {
+    tracks.push({
+      role: 'agent',
+      file: names.agent,
+      bytes: recording.agentBlob.size,
+      container: recording.agentBlob.type,
+    });
+  }
+
+  return {
+    startedAt: new Date(recording.startedAt).toISOString(),
+    durationMs: recording.durationMs,
+    tracks,
+    note:
+      'Both tracks start at the same instant, so they align with each other and ' +
+      'with the diagnostic log from the same call. WebM written by MediaRecorder ' +
+      'carries no duration in its header; use durationMs above, or remux with ' +
+      '`ffmpeg -i in.webm -c copy out.webm` to write one.',
+  };
+}
+
 const mimeType = () =>
   MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
 
