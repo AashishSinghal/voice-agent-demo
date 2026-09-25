@@ -12,6 +12,10 @@ up with a small, cheap model behind it.
 <!-- Drop a screen recording of a call here — an interruption mid-sentence is
      the thing worth showing. ![demo](docs/demo.gif) -->
 
+**New here?** [OVERVIEW.md](./OVERVIEW.md) walks through one call end to end,
+why each piece exists, what a turn costs, and what is planned next. This README
+is the reference.
+
 ---
 
 ## What it does
