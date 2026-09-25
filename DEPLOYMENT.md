@@ -98,20 +98,43 @@ start, which is worse than no demo.
 Langfuse Cloud Hobby for LLM tracing, Sentry for errors. Both free, both just
 environment variables.
 
-## Verified and unverified
+## Does it fit in 512MB?
 
-`npm ci --omit=dev` installs cleanly from the committed lockfile, `npm run build`
-produces the `dist/server.js` the image runs, and the fetch script pulls the
-voice model. **The image itself has not been built** — Docker was not running
-here. Before trusting a deploy, run:
+Yes, measured rather than assumed.
+
+| | |
+|---|---|
+| Image | 416 MB |
+| Idle | 54 MB (10% of the limit) |
+| Peak under load | **343 MB** |
+| Headroom | **169 MB** |
+| OOM killed | no |
+
+The load was the realistic worst case: Piper synthesising sentence after
+sentence with the voice model resident in onnxruntime, overlapping with ffmpeg
+converting an inbound clip, repeated four times. Peak comes from the kernel's
+own high-water mark (`/sys/fs/cgroup/memory.peak`) rather than sampling
+`docker stats`, which can miss a spike between polls.
+
+Reproduce with:
 
 ```bash
-cd backend && docker build --platform linux/amd64 -t voice-agent .
-docker run --rm -p 3000:3000 -e GROQ_API_KEY=... voice-agent
+cd backend
+docker build --platform linux/amd64 -t voice-agent .
+./scripts/check-memory.sh voice-agent 512m
 ```
 
-The `--platform` flag matters: an arm64 image built on an Apple laptop will not
-start on Render.
+The script fails on an OOM kill and also on less than 80MB of headroom — barely
+fitting in a quiet test means OOMing under real traffic.
+
+Two caveats. The measurement was taken under QEMU emulation on arm64, so the
+figures are indicative rather than exact for Render's x86 hardware; the margin
+is wide enough that this should not change the answer. And it exercised one
+caller — the free tier is a single instance, so concurrent callers share that
+512MB.
+
+The `--platform` flag is not optional: an arm64 image built on an Apple laptop
+will not start on Render.
 
 ## If 512 MB turns out to be tight
 

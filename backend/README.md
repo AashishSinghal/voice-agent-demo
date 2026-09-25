@@ -29,6 +29,7 @@ curl -s localhost:3000/health
 | `npm test` | Truncation, backchannel classification, silence artefacts |
 | `npm run build` | Compile to `dist/` |
 | `npm run fetch-voice` | Download a Piper voice model (see below) |
+| `./scripts/check-memory.sh` | Run the image under a memory limit and report the peak |
 
 ## Speech synthesis
 
