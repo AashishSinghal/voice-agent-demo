@@ -3,36 +3,42 @@ import path from 'path';
 import fs from 'fs';
 
 /**
- * Convert to the 16 kHz mono WAV Whisper expects.
+ * Prepare a recording for transcription.
+ *
+ * Whisper accepts webm directly, so there is no reason to decode Opus and
+ * re-encode to PCM — and a strong reason not to. On a 0.1 vCPU free instance
+ * that transcode took about five seconds per clip; remuxing with a stream copy
+ * does no signal processing at all, and skipping ffmpeg entirely costs nothing.
  *
  * `trimStartMs` drops everything before the caller actually started talking.
  * The microphone records for the whole call, so a clip can otherwise open with
  * seconds of room tone — or the agent's own voice, when the caller spoke over
  * it — both of which the transcriber will happily try to make words out of.
+ *
+ * Returns the path to send, which may be the input untouched.
  */
-export async function convertToWav(inputPath: string, trimStartMs = 0): Promise<string> {
+export async function prepareForTranscription(
+  inputPath: string,
+  trimStartMs = 0
+): Promise<string> {
+  if (trimStartMs <= 0) return inputPath;
+
   const outputPath = path.join(
     path.dirname(inputPath),
-    `${path.basename(inputPath, path.extname(inputPath))}_converted.wav`
+    `${path.basename(inputPath, path.extname(inputPath))}_trimmed${path.extname(inputPath)}`
   );
 
   return new Promise((resolve, reject) => {
-    const command = ffmpeg(inputPath);
-    if (trimStartMs > 0) command.setStartTime(trimStartMs / 1000);
-
-    command
-      .audioFrequency(16000) // 16kHz for Whisper
-      .audioChannels(1) // Mono
-      .audioCodec('pcm_s16le') // 16-bit PCM
-      .format('wav')
+    ffmpeg(inputPath)
+      .setStartTime(trimStartMs / 1000)
+      .outputOptions(['-c copy']) // remux only: no decode, no encode
       .save(outputPath)
-      .on('end', () => {
-        console.log(`✅ Audio converted: ${outputPath}`);
-        resolve(outputPath);
-      })
+      .on('end', () => resolve(outputPath))
       .on('error', (err) => {
-        console.error('❌ FFmpeg conversion error:', err);
-        reject(err);
+        // A stream copy can fail on an awkward cut point. The untrimmed clip
+        // is still transcribable, so fall back rather than losing the turn.
+        console.warn(`⚠️  Trim failed, sending untrimmed: ${err.message}`);
+        resolve(inputPath);
       });
   });
 }

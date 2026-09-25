@@ -18,21 +18,28 @@ RUN npm run build
 # ---------- runtime ----------
 FROM node:20-slim
 
-# ffmpeg converts the browser's webm to the wav Whisper wants.
-# python3 is only here for Piper; curl fetches the voice model.
+# Local synthesis is off by default. On a 0.1 vCPU free instance Piper took
+# ~29s for a single sentence, so deployment uses hosted TTS and the image has
+# no reason to carry onnxruntime, Python and a 63MB voice model.
+#   docker build --build-arg INSTALL_PIPER=true .
+ARG INSTALL_PIPER=false
+
+# ffmpeg only remuxes now — Whisper accepts webm, so nothing is transcoded.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
-      python3 \
-      python3-venv \
       curl \
       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Piper lives in a venv: Debian marks the system Python as externally managed
-# and refuses a global pip install. The Linux wheel works, unlike the macOS
-# arm64 one, which is why local development uses `say` instead.
-RUN python3 -m venv /opt/piper \
-    && /opt/piper/bin/pip install --no-cache-dir piper-tts==1.8.0
+# Piper needs a venv: Debian marks the system Python as externally managed and
+# refuses a global pip install. The Linux wheel works, unlike the macOS arm64
+# one, which is why local development uses `say` instead.
+RUN if [ "$INSTALL_PIPER" = "true" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
+      && rm -rf /var/lib/apt/lists/* \
+      && python3 -m venv /opt/piper \
+      && /opt/piper/bin/pip install --no-cache-dir piper-tts==1.8.0; \
+    fi
 
 WORKDIR /app
 
@@ -42,14 +49,14 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 
 # Fetched at build time rather than committed: ~63MB that git would keep
-# forever, and it belongs to its publisher.
+# forever, and it belongs to its publisher. Only needed alongside Piper.
 COPY scripts ./scripts
-RUN ./scripts/fetch-voice.sh
+RUN if [ "$INSTALL_PIPER" = "true" ]; then ./scripts/fetch-voice.sh; fi
 
 ENV NODE_ENV=production \
     PORT=3000 \
     LLM_PROVIDER=groq \
-    TTS_PROVIDER=piper \
+    TTS_PROVIDER=groq \
     PIPER_BIN=/opt/piper/bin/piper \
     PIPER_MODEL=en_US-lessac-medium \
     PIPER_MODEL_PATH=/app/models/piper

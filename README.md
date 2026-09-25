@@ -149,7 +149,7 @@ debug panel measures each stage live; these are the fixed costs.
 | Detect the caller's voice | 250 ms | Sustained sound before we believe it's speech. Lower it and a cough stops the agent. |
 | Pause playback | ~0 ms | Local. The agent goes quiet almost immediately. |
 | Wait for the caller to finish | 450 ms over-speech / 900 ms normal turn | The largest controllable cost. |
-| Upload + convert audio | 100–150 ms | ffmpeg webm → 16 kHz wav. |
+| Prepare audio | 0–20 ms | Whisper takes webm directly, so nothing is transcoded; a trim is a stream-copy remux. |
 | Transcribe | 300–500 ms | Groq Whisper. Network-bound. |
 | Classify | <5 ms | A set lookup, deliberately not a model call. |
 
@@ -176,15 +176,17 @@ Every provider is pluggable, so the same code runs locally and deployed.
 |---|---|---|---|
 | `LLM_PROVIDER` | `groq`, `ollama` | `groq` | `ollama` is fully offline but needs Ollama running. |
 | `GROQ_MODEL` | any free chat model | `openai/gpt-oss-20b` | Groq dropped Llama from the free tier in 2026. [Current list](https://console.groq.com/docs/models). |
-| `TTS_PROVIDER` | `say`, `piper` | `piper` | `.env.example` sets `say` for local dev — see below. |
+| `TTS_PROVIDER` | `say`, `groq`, `piper` | `groq` | `.env.example` sets `say` for local dev — see below. |
+| `GROQ_TTS_VOICE` | Orpheus voices | `troy` | Only when `TTS_PROVIDER=groq`. |
 | `AGENT_PERSONA` | any prompt | general assistant | Repurpose the agent without touching code. |
 | `AGENT_GREETING` | any text | "Hey, I'm listening…" | First thing it says. |
 
 ### Getting a Piper voice
 
-Only needed for `TTS_PROVIDER=piper` (Docker and deployment). The ~63MB model is
-not committed — git keeps binaries in history forever and it belongs to its
-publisher — so fetch it in one command:
+Only needed for `TTS_PROVIDER=piper`, which is now opt-in: deployment uses
+hosted synthesis because the free instance has 0.1 vCPU, where Piper took ~29s
+for a single sentence. The ~63MB model is not committed — git keeps binaries in
+history forever and it belongs to its publisher — so fetch it when you want it:
 
 ```bash
 cd backend && npm run fetch-voice
@@ -234,7 +236,7 @@ backend/src/
   services/llmService.ts       streaming LLM, provider-agnostic, cancellable
   services/ttsService.ts       TTS, provider-agnostic, cancellable
   services/whisperService.ts   Groq Whisper STT
-  services/audioProcessor.ts   ffmpeg webm → 16 kHz mono wav, trimmed to onset
+  services/audioProcessor.ts   trims to the speech onset; never transcodes
   services/timeline.ts         per-stage turn timings
   smoke.ts                     tests
 

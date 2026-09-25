@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import Groq from 'groq-sdk';
 
 /**
  * Text-to-speech, pluggable by provider.
@@ -19,11 +20,35 @@ import crypto from 'crypto';
  * instead of finishing audio nobody will hear.
  */
 
-export type TtsProvider = 'piper' | 'say';
+export type TtsProvider = 'piper' | 'say' | 'groq';
 
 export function activeTtsProvider(): TtsProvider {
-  const raw = (process.env.TTS_PROVIDER || 'piper').toLowerCase();
-  return raw === 'say' ? 'say' : 'piper';
+  const raw = (process.env.TTS_PROVIDER || 'groq').toLowerCase();
+  if (raw === 'say') return 'say';
+  if (raw === 'piper') return 'piper';
+  return 'groq';
+}
+
+/** Hosted synthesis. No local CPU, at the cost of a request from the quota. */
+async function synthesizeWithGroq(text: string, signal?: AbortSignal): Promise<Buffer> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey || apiKey === 'your_groq_api_key_here') {
+    throw new Error('GROQ_API_KEY is not configured');
+  }
+
+  const groq = new Groq({ apiKey });
+
+  const response = await groq.audio.speech.create(
+    {
+      model: process.env.GROQ_TTS_MODEL || 'canopylabs/orpheus-v1-english',
+      voice: process.env.GROQ_TTS_VOICE || 'troy',
+      input: text,
+      response_format: 'wav',
+    },
+    { signal }
+  );
+
+  return Buffer.from(await response.arrayBuffer());
 }
 
 function tempWavPath(): string {
@@ -80,8 +105,12 @@ export async function synthesizeSpeechFromText(
 ): Promise<Buffer> {
   if (signal?.aborted) throw new DOMException('Synthesis aborted', 'AbortError');
 
-  const outputPath = tempWavPath();
   const provider = activeTtsProvider();
+
+  // Hosted synthesis never touches the filesystem.
+  if (provider === 'groq') return synthesizeWithGroq(text, signal);
+
+  const outputPath = tempWavPath();
 
   try {
     if (provider === 'say') {

@@ -301,17 +301,19 @@ io.on('connection', (socket: Socket) => {
       'uploads',
       `input_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.webm`
     );
-    let convertedPath: string | null = null;
+    // May be the input itself when no trim is needed, so only clean up a
+    // genuinely separate file.
+    let preparedPath: string | null = null;
     const startedAt = Date.now();
 
     try {
       await fs.promises.mkdir('uploads', { recursive: true });
       await fs.promises.writeFile(tempPath, Buffer.from(audio));
-      convertedPath = await audioProcessor.convertToWav(tempPath, trimStartMs);
-      timeline?.mark('audio converted');
+      preparedPath = await audioProcessor.prepareForTranscription(tempPath, trimStartMs);
+      timeline?.mark('audio prepared');
 
       const result = await withTimeout(
-        whisperService.transcribeAudioToText(convertedPath),
+        whisperService.transcribeAudioToText(preparedPath),
         STT_TIMEOUT_MS,
         'Transcription'
       );
@@ -323,8 +325,10 @@ io.on('connection', (socket: Socket) => {
       note('transcript', { ms, text: text ?? null, bytes: audio.byteLength });
       return text ? { text, ms } : null;
     } finally {
+      if (preparedPath && preparedPath !== tempPath) {
+        await audioProcessor.cleanupAudioFile(preparedPath);
+      }
       await audioProcessor.cleanupAudioFile(tempPath);
-      if (convertedPath) await audioProcessor.cleanupAudioFile(convertedPath);
     }
   };
 

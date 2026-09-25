@@ -32,5 +32,11 @@ services:
       # Current list: https://console.groq.com/docs/models
       - key: GROQ_MODEL
         value: openai/gpt-oss-20b
+      # Hosted synthesis. The free instance has 0.1 vCPU, where local Piper
+      # took ~29s for one sentence.
       - key: TTS_PROVIDER
-        value: piper
+        value: groq
+      - key: GROQ_TTS_MODEL
+        value: canopylabs/orpheus-v1-english
+      - key: GROQ_TTS_VOICE
+        value: troy

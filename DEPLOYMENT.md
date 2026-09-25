@@ -10,7 +10,7 @@ move fast, so re-check anything before relying on it.
 Browser ──WebSocket──> Backend (Render free, Docker)
    │                      ├─ STT  → Groq Whisper        (free tier)
    │                      ├─ LLM  → Groq gpt-oss-20b    (free tier, streaming)
-   │                      └─ TTS  → Piper, in the image (no API, no limits)
+   │                      └─ TTS  → Groq Orpheus       (hosted, no local CPU)
    └── static frontend on Vercel (free)
 ```
 
@@ -20,7 +20,7 @@ Browser ──WebSocket──> Backend (Render free, Docker)
 | Backend | **Render free web service** | 750 h/mo, 512 MB, 0.1 vCPU | One of the few remaining always-free tiers that supports **Docker + WebSockets** with no credit card |
 | STT | **Groq Whisper** | 20 RPM · 2,000 req/day · **8 h audio/day** | Already what the code uses; effectively unlimited at demo volume |
 | LLM | **Groq `openai/gpt-oss-20b`** | 30 RPM · 1,000 req/day · 200K tokens/day | Fast enough for voice; streaming supported |
-| TTS | **Piper in the image** | unlimited | No API quota, no extra key. ~50 MB model, runs fine in 512 MB |
+| TTS | **Groq Orpheus** | shares the 1,000/day | Hosted, because the free instance has 0.1 vCPU |
 | LLM tracing | **Langfuse Cloud Hobby** | free | You already know it; gives you the eval/latency story |
 | Errors | **Sentry** | 5K errors/mo free | Catch crashes you'd never see otherwise |
 | Uptime | **UptimeRobot** | 50 monitors free | Also solves the cold-start problem below |
@@ -69,8 +69,8 @@ The repo carries the config, so this is mostly clicking.
 2. When it asks for the two secrets:
    - `GROQ_API_KEY` — from https://console.groq.com/keys
    - `CLIENT_URL` — leave blank for now, you do not have the Vercel URL yet.
-3. Wait for the first build. It installs ffmpeg and Piper and downloads the
-   voice model, so expect a few minutes.
+3. The build takes well under a minute — it installs ffmpeg and nothing else
+   heavy, since synthesis is hosted.
 4. Check it came up: `curl https://<your-app>.onrender.com/health` — you want
    `"groqKey": "configured"`.
 
@@ -98,52 +98,53 @@ start, which is worse than no demo.
 Langfuse Cloud Hobby for LLM tracing, Sentry for errors. Both free, both just
 environment variables.
 
-## Does it fit in 512MB?
+## The free tier's real constraint is CPU, not memory
 
-Yes, measured rather than assumed.
+Memory was never the problem. The free instance gives **0.1 vCPU**, and that is
+what hurts. Measured on a deployed call:
 
-| | |
-|---|---|
-| Image | 416 MB |
-| Idle | 54 MB (10% of the limit) |
-| Peak under load | **343 MB** |
-| Headroom | **169 MB** |
-| OOM killed | no |
+| Stage | Local | Render free | Why |
+|---|---|---|---|
+| LLM first token | 440 ms | **365 ms** | network call — unaffected |
+| Whisper | 400 ms | 400–1100 ms | network call — unaffected |
+| ffmpeg transcode | 120 ms | **5,200 ms** | CPU |
+| Piper synthesis | 560 ms | **28,900 ms** | CPU |
 
-The load was the realistic worst case: Piper synthesising sentence after
-sentence with the voice model resident in onnxruntime, overlapping with ffmpeg
-converting an inbound clip, repeated four times. Peak comes from the kernel's
-own high-water mark (`/sys/fs/cgroup/memory.peak`) rather than sampling
-`docker stats`, which can miss a spike between polls.
+One turn took 104 seconds end to end. Everything computed on the box ran 25–50×
+slower; everything behind an API was fine.
 
-Reproduce with:
+So the deployment does no signal processing:
+
+- **TTS is hosted** (`TTS_PROVIDER=groq`, Orpheus). Synthesis becomes a network
+  call. Piper is still supported for a paid instance with real CPU — build with
+  `--build-arg INSTALL_PIPER=true`.
+- **Audio is never transcoded.** Whisper accepts webm directly, so a clip that
+  needs no trim is forwarded untouched, and one that does is remuxed with a
+  stream copy. No decode, no re-encode.
+
+Dropping local synthesis also shrank the image from **1.48 GB to 253 MB**, and
+the build from several minutes to 18 seconds.
+
+Idle memory is 57 MB of the 512 MB. `scripts/check-memory.sh` still exists for
+the Piper build, where memory is worth checking:
 
 ```bash
-cd backend
-docker build --platform linux/amd64 -t voice-agent .
+docker build --platform linux/amd64 --build-arg INSTALL_PIPER=true -t voice-agent .
 ./scripts/check-memory.sh voice-agent 512m
 ```
 
-The script fails on an OOM kill and also on less than 80MB of headroom — barely
-fitting in a quiet test means OOMing under real traffic.
-
-Two caveats. The measurement was taken under QEMU emulation on arm64, so the
-figures are indicative rather than exact for Render's x86 hardware; the margin
-is wide enough that this should not change the answer. And it exercised one
-caller — the free tier is a single instance, so concurrent callers share that
-512MB.
+Under that build the peak was 343 MB with 169 MB of headroom — it fits, it is
+simply far too slow to use.
 
 The `--platform` flag is not optional: an arm64 image built on an Apple laptop
 will not start on Render.
 
-## If 512 MB turns out to be tight
+## Quota
 
-Piper, ffmpeg and Node together are close to the limit. If it OOMs, swap TTS to
-**Groq's Orpheus** models (they replaced `playai-tts` in 2026) — that removes the
-Piper binary and the model file from the image entirely, at the cost of spending
-your Groq request budget on speech as well as text. The TTS call is isolated in
-`ttsService.ts` behind a `TTS_PROVIDER` switch, so it is one new branch in one
-file plus an environment variable — no change to the pipeline around it.
+Hosted TTS spends the Groq free tier's 1,000 daily requests. A three-sentence
+answer costs three TTS calls plus one LLM call plus one transcription — roughly
+five per turn, so about 200 turns a day. Ample for a demo, worth knowing before
+sharing the link widely.
 
 ## Honest limitations to mention in an interview
 

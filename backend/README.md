@@ -66,7 +66,7 @@ src/
   services/llmService.ts       streaming LLM, provider-agnostic, cancellable
   services/ttsService.ts       TTS, provider-agnostic, cancellable
   services/whisperService.ts   Groq Whisper STT
-  services/audioProcessor.ts   ffmpeg webm → 16 kHz mono wav, trimmed to onset
+  services/audioProcessor.ts   trims to the speech onset; never transcodes
   services/timeline.ts         per-stage turn timings
   smoke.ts                     tests
 ```
