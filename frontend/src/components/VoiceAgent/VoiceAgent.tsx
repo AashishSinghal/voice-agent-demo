@@ -22,6 +22,14 @@ const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
 const SPEECH_FACTOR = 3.0;
 const SILENCE_FACTOR = 1.8;
 
+/**
+ * How often the client tells the server it is still playing.
+ *
+ * Comfortably inside the server's stuck-state timeout, and short enough that a
+ * single long sentence cannot pass without one.
+ */
+const PLAYBACK_HEARTBEAT_MS = 4_000;
+
 /** Longest single utterance before we send it regardless. */
 const MAX_TURN_MS = 15_000;
 /**
@@ -145,6 +153,7 @@ const VoiceAgent = () => {
     endCall,
     notifyBarge,
     cancelBarge,
+    notifyPlaybackProgress,
     notifyPlaybackComplete,
   } = useSocketConnection(SERVER_URL, {
     onAudioChunk: (chunk) => playback.enqueue(chunk),
@@ -384,6 +393,24 @@ const VoiceAgent = () => {
     // next call starts from the same blank slate as the first.
     endCall();
   }, [recorder, playback, release, endCall]);
+
+  /**
+   * While audio is playing the client otherwise sends nothing, so a 26-second
+   * answer looked exactly like a wedged call and the server's watchdog cut it
+   * off mid-sentence.
+   */
+  useEffect(() => {
+    if (!isCallActive || !playback.isPlaying) return;
+
+    const beat = () => {
+      const turnId = playback.latestTurn();
+      if (turnId !== null) notifyPlaybackProgress(turnId);
+    };
+
+    beat();
+    const interval = window.setInterval(beat, PLAYBACK_HEARTBEAT_MS);
+    return () => clearInterval(interval);
+  }, [isCallActive, playback.isPlaying, playback, notifyPlaybackProgress]);
 
   useEffect(() => release, [release]);
 

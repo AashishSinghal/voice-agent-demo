@@ -62,10 +62,20 @@ const GREETING = process.env.AGENT_GREETING || "Hey, I'm listening. What can I h
 const STT_TIMEOUT_MS = 20_000;
 /**
  * How long a busy state may go without progress before the watchdog steps in.
- * Generous: a long final sentence can take several seconds to play out on the
- * client before playback:complete arrives.
+ *
+ * The client heartbeats while it plays, so silence for this long genuinely
+ * means something is stuck rather than that the answer is simply long.
  */
 const STUCK_TIMEOUT_MS = 20_000;
+/**
+ * Speaking gets a longer budget than thinking.
+ *
+ * While the agent talks, the only thing that can move is the client's
+ * playback, and a long answer runs half a minute. Heartbeats should keep this
+ * from ever being reached; it exists so that if they stop, the agent is cut
+ * off late rather than in the middle of a sentence.
+ */
+const SPEAKING_STUCK_TIMEOUT_MS = 45_000;
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
@@ -583,6 +593,18 @@ io.on('connection', (socket: Socket) => {
     }
   );
 
+  /**
+   * The client is still playing audio.
+   *
+   * Between the last chunk being sent and playback finishing, the client would
+   * otherwise say nothing at all — so a long answer looked identical to a
+   * wedged call, and the watchdog cut it off mid-sentence. This is the client
+   * saying it is fine.
+   */
+  socket.on('playback:progress', () => {
+    // The inbound handler already marks progress; nothing else to do.
+  });
+
   /** Every chunk for a turn has finished playing — the turn is now history. */
   socket.on('playback:complete', (data: { turnId: number }) => {
     if (data?.turnId !== session.pendingTurnId) {
@@ -628,9 +650,15 @@ io.on('connection', (socket: Socket) => {
       session.state === 'thinking' || session.state === 'speaking' || session.state === 'paused';
     if (!busy) return;
     if (session.controller !== null) return; // generation genuinely in flight
-    if (Date.now() - lastProgressAt < STUCK_TIMEOUT_MS) return;
 
-    console.warn(`⚠️  watchdog: stuck in '${session.state}' — returning to listening`);
+    const idleFor = Date.now() - lastProgressAt;
+    const budget = session.state === 'speaking' ? SPEAKING_STUCK_TIMEOUT_MS : STUCK_TIMEOUT_MS;
+    if (idleFor < budget) return;
+
+    console.warn(
+      `⚠️  watchdog: '${session.state}' made no progress for ${idleFor}ms ` +
+        `(budget ${budget}ms) — returning to listening`
+    );
     backToListening('watchdog');
   }, 2000);
 

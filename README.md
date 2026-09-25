@@ -33,9 +33,10 @@ kept, so "go back to what you were explaining" produces a continuation rather
 than a blank look.
 
 **Recovers from its own mistakes.** Per-stage timeouts, a watchdog for a call
-that stops making progress, an adaptive noise gate calibrated to your
-microphone, and a filter for the caption boilerplate Whisper emits when handed
-silence.
+that stops making progress — with the client heartbeating while it plays, so a
+long answer is never mistaken for a stall — an adaptive noise gate calibrated to
+your microphone, and a filter for the caption boilerplate Whisper emits when
+handed silence.
 
 ---
 

@@ -315,6 +315,15 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     socketRef.current?.emit('barge:cancelled', { reason });
   }, []);
 
+  /**
+   * Still playing. Sent periodically so the server can tell a long answer from
+   * a stalled one — without it, the server's watchdog eventually assumes the
+   * call is wedged and cuts the agent off mid-sentence.
+   */
+  const notifyPlaybackProgress = useCallback((turnId: number) => {
+    socketRef.current?.emit('playback:progress', { turnId });
+  }, []);
+
   const notifyPlaybackComplete = useCallback((turnId: number) => {
     diag.log('socket-out', 'playback:complete', { turnId });
     socketRef.current?.emit('playback:complete', { turnId });
@@ -330,6 +339,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     resetSession,
     notifyBarge,
     cancelBarge,
+    notifyPlaybackProgress,
     notifyPlaybackComplete,
   };
 };
