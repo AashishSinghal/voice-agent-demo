@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, Download, Mic, X } from 'lucide-react';
+import { Check, Copy, Download, X } from 'lucide-react';
 import { useBotStateStore, median, type TimelineKind } from '../../stores/useBotStateStore';
 import type { VadCalibration } from '../../hooks/useVoiceActivityDetection';
 import { diag } from '../../lib/diagnostics';
+import { createZip } from '../../lib/zip';
 import {
   buildManifest,
   type ConversationRecording,
@@ -132,6 +133,65 @@ const saveBlob = (blob: Blob, name: string) => {
 
 const kb = (blob: Blob | null) => (blob ? `${Math.round(blob.size / 1024)} KB` : '—');
 
+const bytesOf = async (blob: Blob) => new Uint8Array(await blob.arrayBuffer());
+
+/**
+ * Everything from one call, in one file.
+ *
+ * The pieces are only useful together — audio without the log has no
+ * transcripts or timings, and the log without audio cannot be listened to — so
+ * collecting them by hand from four buttons was the wrong shape.
+ */
+async function buildBundle(recording: ConversationRecording | null): Promise<Blob> {
+  const encoder = new TextEncoder();
+  const stamp = recording?.startedAt ?? Date.now();
+
+  const contents: { name: string; data: Uint8Array }[] = [
+    { name: 'diagnostics.txt', data: encoder.encode(diag.toText()) },
+  ];
+
+  const readme = [
+    'Voice agent debug bundle',
+    '',
+    'diagnostics.txt  client events, socket traffic both ways, microphone level',
+    '                 over time, and every line the server printed — one',
+    '                 timeline, ordered by time.',
+  ];
+
+  if (recording) {
+    const names = {
+      caller: 'audio/you.webm',
+      agent: 'audio/agent.webm',
+    };
+
+    if (recording.callerBlob) {
+      contents.push({ name: names.caller, data: await bytesOf(recording.callerBlob) });
+    }
+    if (recording.agentBlob) {
+      contents.push({ name: names.agent, data: await bytesOf(recording.agentBlob) });
+    }
+
+    contents.push({
+      name: 'manifest.json',
+      data: encoder.encode(JSON.stringify(buildManifest(recording, names), null, 2)),
+    });
+
+    readme.push(
+      'audio/           the two voices, recorded separately and starting at the',
+      '                 same instant, so they align with each other and with the',
+      '                 timestamps in diagnostics.txt.',
+      'manifest.json    durations and byte counts. Browser WebM carries no',
+      '                 duration in its header, which is what this is for.'
+    );
+  } else {
+    readme.push('', 'No audio: call recording was not enabled for this call.');
+  }
+
+  contents.push({ name: 'README.txt', data: encoder.encode(readme.join('\n') + '\n') });
+
+  return createZip(contents, new Date(stamp));
+}
+
 const DebugPanel = ({
   open,
   onClose,
@@ -149,6 +209,7 @@ const DebugPanel = ({
 }: DebugPanelProps) => {
   const { state, events, timeline, benchmarks } = useBotStateStore();
   const [copied, setCopied] = useState(false);
+  const [bundling, setBundling] = useState(false);
   const [entryCount, setEntryCount] = useState(0);
 
   // The recorder is not React state; subscribe so the count stays current.
@@ -191,11 +252,23 @@ const DebugPanel = ({
               {copied ? 'Copied' : 'Copy log'}
             </button>
             <button
-              onClick={() => diag.download()}
-              className="flex flex-1 items-center justify-center gap-1.5 rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-300 transition hover:bg-white/5"
+              onClick={async () => {
+                setBundling(true);
+                try {
+                  const bundle = await buildBundle(conversationRecording);
+                  saveBlob(
+                    bundle,
+                    `voice-agent-${conversationRecording?.startedAt ?? Date.now()}.zip`
+                  );
+                } finally {
+                  setBundling(false);
+                }
+              }}
+              disabled={bundling}
+              className="flex flex-[1.4] items-center justify-center gap-1.5 rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-300 transition hover:bg-white/5 disabled:opacity-50"
             >
               <Download className="h-3.5 w-3.5" />
-              Download
+              {bundling ? 'Packing…' : 'Download bundle'}
             </button>
             <button
               onClick={() => {
@@ -209,7 +282,11 @@ const DebugPanel = ({
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
             {entryCount} events captured — client, server, socket traffic and
-            microphone level, in one timeline. Audio is recorded by size only.
+            microphone level, in one timeline. The bundle is a zip holding that
+            log
+            {conversationRecording
+              ? ', both audio tracks and a manifest.'
+              : '. Enable recording below to include audio.'}
           </p>
         </section>
         <section>
@@ -296,64 +373,13 @@ const DebugPanel = ({
           </p>
 
           {conversationRecording && (
-            <div className="mt-3 space-y-2">
-              <div className="flex gap-2">
-                <button
-                  onClick={() =>
-                    conversationRecording.callerBlob &&
-                    saveBlob(
-                      conversationRecording.callerBlob,
-                      `call-${conversationRecording.startedAt}-you.webm`
-                    )
-                  }
-                  disabled={!conversationRecording.callerBlob}
-                  className="flex flex-1 items-center justify-center gap-1.5 rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-300 transition hover:bg-white/5 disabled:opacity-40"
-                >
-                  <Mic className="h-3.5 w-3.5" />
-                  You · {kb(conversationRecording.callerBlob)}
-                </button>
-                <button
-                  onClick={() =>
-                    conversationRecording.agentBlob &&
-                    saveBlob(
-                      conversationRecording.agentBlob,
-                      `call-${conversationRecording.startedAt}-agent.webm`
-                    )
-                  }
-                  disabled={!conversationRecording.agentBlob}
-                  className="flex flex-1 items-center justify-center gap-1.5 rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-300 transition hover:bg-white/5 disabled:opacity-40"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  Agent · {kb(conversationRecording.agentBlob)}
-                </button>
-              </div>
-              <button
-                onClick={() => {
-                  const names = {
-                    caller: `call-${conversationRecording.startedAt}-you.webm`,
-                    agent: `call-${conversationRecording.startedAt}-agent.webm`,
-                  };
-                  saveBlob(
-                    new Blob([JSON.stringify(buildManifest(conversationRecording, names), null, 2)], {
-                      type: 'application/json',
-                    }),
-                    `call-${conversationRecording.startedAt}-manifest.json`
-                  );
-                }}
-                className="w-full rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-400 transition hover:bg-white/5 hover:text-zinc-200"
-              >
-                Manifest · durations and alignment
-              </button>
-
-              <p className="text-[11px] leading-relaxed text-zinc-600">
-                {(conversationRecording.durationMs / 1000).toFixed(1)}s. Both
-                tracks start together, so they line up with each other and with
-                the diagnostic log — which carries the transcripts and
-                classifications that turn them into labelled evaluation data.
-                WebM from a browser carries no duration in its header, which is
-                what the manifest is for.
-              </p>
-            </div>
+            <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
+              Captured {(conversationRecording.durationMs / 1000).toFixed(1)}s ·
+              you {kb(conversationRecording.callerBlob)} · agent{' '}
+              {kb(conversationRecording.agentBlob)}. Included in the bundle
+              above, alongside the log that carries the transcripts and
+              classifications.
+            </p>
           )}
         </section>
 

@@ -37,10 +37,9 @@ Open **debug** (top right):
   indented.
 - **Reaction benchmark** — time from hearing you to the agent acting, split by
   interruption and backchannel.
-- **Diagnostics** — Copy or Download the whole session: client events, socket
-  traffic both ways, the microphone curve, and *every line the server prints* —
-  including output from services and dependencies, not just socket events.
-  Audio is recorded by size only.
+- **Diagnostics** — **Download bundle** produces one zip: the full timeline,
+  both audio tracks if the call was recorded, a manifest with their durations,
+  and a README. The pieces are only useful together, so they travel together.
 
 `__diag.toText()` and `__botStore` are exposed on `window` in dev.
 
