@@ -62,6 +62,14 @@ Without these, one bored visitor can exhaust the day's budget.
 
 The repo carries the config, so this is mostly clicking.
 
+### 0. Accept the Orpheus terms (once)
+
+Groq gates its speech models behind a one-time terms acceptance, per
+organisation. Open
+[the playground for the model](https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english)
+as an org admin and accept. Skip it and every synthesis returns a 400 with
+`model_terms_required` — no redeploy is needed once accepted.
+
 ### 1. Backend → Render
 
 1. **New → Blueprint**, pick this repo. Render reads [`render.yaml`](./render.yaml)

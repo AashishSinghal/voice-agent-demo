@@ -1,6 +1,8 @@
 import { Conversation } from './services/conversation.js';
 import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
 import { installLogBridge, subscribeToLogs, type LogLine } from './services/logBridge.js';
+import { explainGroqTtsFailure } from './services/ttsService.js';
+import Groq from 'groq-sdk';
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -130,6 +132,28 @@ unsubscribe();
 const afterUnsubscribe = captured.length;
 console.log('should not be captured');
 check('unsubscribe works', captured.length, afterUnsubscribe);
+
+console.log('\n--- groq tts failures explain themselves ---');
+const { APIError } = Groq as unknown as { APIError: { generate: (s: number, b: unknown, m: string, h: unknown) => Error } };
+const apiError = (status: number, body: unknown) => APIError.generate(status, body, 'msg', {});
+const MODEL = 'canopylabs/orpheus-v1-english';
+
+for (const [label, err, fragment] of [
+  [
+    'terms required',
+    apiError(400, { error: { message: 'x', type: 'invalid_request_error', code: 'model_terms_required' } }),
+    'terms accepted',
+  ],
+  ['rate limited', apiError(429, { error: { message: 'slow down' } }), 'rate limit'],
+  ['bad key', apiError(401, { error: { message: 'nope' } }), 'rejected the API key'],
+] as const) {
+  const explained = explainGroqTtsFailure(err, MODEL);
+  check(`${label} -> mentions "${fragment}"`, explained.message.includes(fragment), true);
+}
+
+// An abort is not a failure to explain; it must pass straight through.
+const aborted = new DOMException('Synthesis aborted', 'AbortError');
+check('abort passes through untouched', explainGroqTtsFailure(aborted, MODEL) === aborted, true);
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

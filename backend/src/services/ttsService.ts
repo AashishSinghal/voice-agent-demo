@@ -37,18 +37,66 @@ async function synthesizeWithGroq(text: string, signal?: AbortSignal): Promise<B
   }
 
   const groq = new Groq({ apiKey });
+  const model = process.env.GROQ_TTS_MODEL || 'canopylabs/orpheus-v1-english';
 
-  const response = await groq.audio.speech.create(
-    {
-      model: process.env.GROQ_TTS_MODEL || 'canopylabs/orpheus-v1-english',
-      voice: process.env.GROQ_TTS_VOICE || 'troy',
-      input: text,
-      response_format: 'wav',
-    },
-    { signal }
-  );
+  try {
+    const response = await groq.audio.speech.create(
+      {
+        model,
+        voice: process.env.GROQ_TTS_VOICE || 'troy',
+        input: text,
+        response_format: 'wav',
+      },
+      { signal }
+    );
 
-  return Buffer.from(await response.arrayBuffer());
+    return Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    throw explainGroqTtsFailure(error, model);
+  }
+}
+
+/**
+ * Turn a Groq API rejection into something actionable.
+ *
+ * These arrive as a bare 400 with the detail buried in a nested body. The
+ * terms-acceptance one in particular is a single click in the console, but
+ * unwrapped it reads like a broken request and sends you looking at the code.
+ */
+export function explainGroqTtsFailure(error: unknown, model: string): Error {
+  if (error instanceof DOMException && error.name === 'AbortError') return error;
+
+  // Where the code lands varies by SDK version: sometimes on the error itself,
+  // sometimes inside the parsed body, which may or may not be wrapped again.
+  const err = error as {
+    status?: number;
+    code?: string;
+    message?: string;
+    error?: { code?: string; error?: { code?: string } };
+  };
+  const code = err?.code ?? err?.error?.code ?? err?.error?.error?.code;
+
+  if (code === 'model_terms_required') {
+    return new Error(
+      `The Groq model "${model}" needs its terms accepted before it can be used. ` +
+        `An org admin has to accept them once at ` +
+        `https://console.groq.com/playground?model=${encodeURIComponent(model)} — ` +
+        `no redeploy needed afterwards.`
+    );
+  }
+
+  if (err?.status === 429) {
+    return new Error(
+      'Groq rate limit reached. Hosted speech shares the free tier\'s daily ' +
+        'request budget with transcription and the LLM.'
+    );
+  }
+
+  if (err?.status === 401 || err?.status === 403) {
+    return new Error('Groq rejected the API key for text-to-speech.');
+  }
+
+  return new Error(`Groq text-to-speech failed: ${err?.message ?? String(error)}`);
 }
 
 function tempWavPath(): string {
