@@ -17,6 +17,24 @@ export interface ConversationMessage {
   kind?: 'backchannel' | 'resume' | 'interruption';
 }
 
+export interface CostReport {
+  turn: { sttUsd: number; llmUsd: number; ttsUsd: number; totalUsd: number };
+  session: {
+    sttUsd: number;
+    llmUsd: number;
+    ttsUsd: number;
+    totalUsd: number;
+    turns: number;
+  };
+  detail: {
+    billedAudioSeconds: number;
+    actualAudioSeconds: number;
+    promptTokens: number;
+    completionTokens: number;
+    spokenCharacters: number;
+  };
+}
+
 export interface TurnMetrics {
   sttMs: number | null;
   firstTokenMs: number | null;
@@ -49,6 +67,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
   const [connected, setConnected] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [metrics, setMetrics] = useState<TurnMetrics | null>(null);
+  const [costReport, setCostReport] = useState<CostReport | null>(null);
 
   const { setState, setSubstatus, logEvent, attachServerMarks, finishTimeline } =
     useBotStateStore();
@@ -63,6 +82,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
   const resetSession = useCallback(() => {
     setMessages([]);
     setMetrics(null);
+    setCostReport(null);
     useBotStateStore.getState().reset();
     diag.log('client', 'session reset');
   }, []);
@@ -206,9 +226,10 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
 
     socket.on(
       'response:done',
-      (d: { turnId: number; text: string; metrics: TurnMetrics | null }) => {
+      (d: { turnId: number; text: string; metrics: TurnMetrics | null; cost?: CostReport }) => {
         finalise(d.turnId, 'complete', d.text);
         if (d.metrics) setMetrics(d.metrics);
+        if (d.cost) setCostReport(d.cost);
         handlersRef.current.onTurnComplete(d.turnId);
       }
     );
@@ -259,6 +280,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
         spokenChunks: number;
         trimStartMs: number;
         spokenMs: number;
+        clipMs: number;
       }
     ) => {
       if (!socketRef.current?.connected) return;
@@ -268,6 +290,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
         spokenChunks: opts.spokenChunks,
         trimStartMs: opts.trimStartMs,
         spokenMs: opts.spokenMs,
+        clipMs: opts.clipMs,
       });
       blob.arrayBuffer().then((audio) =>
         socketRef.current?.emit('audio:input', {
@@ -276,6 +299,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
           spokenChunks: opts.spokenChunks,
           trimStartMs: opts.trimStartMs,
           spokenMs: opts.spokenMs,
+          clipMs: opts.clipMs,
         })
       );
     },
@@ -286,6 +310,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     if (!socketRef.current?.connected) return;
     setMessages([]);
     setMetrics(null);
+    setCostReport(null);
     diag.log('socket-out', 'call:start');
     socketRef.current.emit('call:start');
   }, []);
@@ -333,6 +358,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     connected,
     messages,
     metrics,
+    costReport,
     sendAudio,
     startCall,
     endCall,

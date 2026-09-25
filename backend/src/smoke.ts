@@ -3,6 +3,7 @@ import { classifyUtterance, looksHallucinated } from './services/backchannel.js'
 import { installLogBridge, subscribeToLogs, type LogLine } from './services/logBridge.js';
 import { explainGroqTtsFailure } from './services/ttsService.js';
 import Groq from 'groq-sdk';
+import * as cost from './services/cost.js';
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -154,6 +155,45 @@ for (const [label, err, fragment] of [
 // An abort is not a failure to explain; it must pass straight through.
 const aborted = new DOMException('Synthesis aborted', 'AbortError');
 check('abort passes through untouched', explainGroqTtsFailure(aborted, MODEL) === aborted, true);
+
+console.log('\n--- cost model ---');
+
+// Transcription bills a ten-second minimum per request.
+check('short clip billed at the minimum', cost.billedAudioSeconds(2.4), 10);
+check('long clip billed at its real length', cost.billedAudioSeconds(24), 24);
+check(
+  'a 10s clip costs the hourly rate / 360',
+  Number(cost.sttCost(10).toFixed(8)),
+  Number((0.111 / 360).toFixed(8))
+);
+check('trimming below the minimum saves nothing', cost.sttCost(1) === cost.sttCost(9), true);
+
+// Per-million arithmetic.
+check(
+  'llm priced per million tokens',
+  Number(cost.llmCost({ promptTokens: 1_000_000, completionTokens: 0 }).toFixed(6)),
+  0.075
+);
+check(
+  'tts priced per million characters',
+  Number(cost.ttsCost(1_000_000).toFixed(6)),
+  22
+);
+
+// The finding this whole exercise exists to surface.
+const turn = cost.turnCost({
+  audioSeconds: 2.4,
+  usage: { promptTokens: 600, completionTokens: 67 },
+  spokenCharacters: 403,
+});
+check('synthesis dominates a realistic turn', turn.ttsUsd / turn.totalUsd > 0.9, true);
+check('language model is a rounding error', turn.llmUsd / turn.totalUsd < 0.02, true);
+
+// Accumulation across a call.
+const twice = cost.addCost(turn, turn);
+check('session total accumulates', Number(twice.totalUsd.toFixed(8)), Number((turn.totalUsd * 2).toFixed(8)));
+check('session characters accumulate', twice.detail.spokenCharacters, 806);
+check('first turn seeds the session', cost.addCost(null, turn).totalUsd, turn.totalUsd);
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

@@ -140,6 +140,34 @@ exportable diagnostic log.
 
 ---
 
+## Cost
+
+Every turn is priced at on-demand rates and reported in the debug panel, even
+though the project runs on a free tier. Knowing the shape of the bill before it
+exists is the point, because the shape is not the obvious one.
+
+A real turn — a 2.4 second clip in, a 403-character answer out:
+
+| Stage | Cost | Share |
+|---|---|---|
+| Speech synthesis | 0.887c | **96.0%** |
+| Transcription | 0.031c | 3.3% |
+| Language model | 0.007c | 0.7% |
+
+Roughly $9.24 per thousand turns, and synthesis is essentially all of it.
+
+Two things follow, both counter-intuitive:
+
+**Transcription bills a ten-second minimum per request.** A 2.4 second clip is
+billed as ten — 4.2x the audio actually sent. Trimming a clip tighter helps
+accuracy and latency, and saves nothing at all on spend.
+
+**The obvious optimisations target 3% of the bill.** Moving transcription to
+the cheaper turbo model cuts that line by 64% and the total by 2.1%. Cutting
+the agent from 403 characters to 150 cuts the total by **60%**, because
+synthesis bills per character. Verbosity is the cost driver, and it is also a
+latency driver — the same change wins twice.
+
 ## Latency budget
 
 Interruption handling is a pipeline and the caller feels the sum of it. The

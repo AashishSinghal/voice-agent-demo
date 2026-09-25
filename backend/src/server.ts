@@ -15,7 +15,8 @@ import { classifyUtterance, looksHallucinated } from './services/backchannel.js'
 import { Conversation } from './services/conversation.js';
 import { Timeline } from './services/timeline.js';
 import { installLogBridge, subscribeToLogs } from './services/logBridge.js';
-import type { CallState, TurnMetrics } from './models/types.js';
+import type { CallState, CostReport, TurnMetrics } from './models/types.js';
+import * as cost from './services/cost.js';
 
 dotenv.config();
 
@@ -106,6 +107,11 @@ interface Session {
   bargeChunksPlayed: number;
   /** Set when the caller asked the agent to carry on. */
   resumeHint: string | null;
+  /** Running spend for the call, and how many turns produced it. */
+  spend: cost.TurnCost | null;
+  spendTurns: number;
+  /** Length of the clip that started the current turn, for STT billing. */
+  clipSeconds: number;
 }
 
 /**
@@ -177,6 +183,9 @@ io.on('connection', (socket: Socket) => {
     pendingTurnId: null,
     bargeChunksPlayed: 0,
     resumeHint: null,
+    spend: null,
+    spendTurns: 0,
+    clipSeconds: 0,
   };
 
   /** Last time anything moved. A busy state with no recent progress is stuck. */
@@ -223,6 +232,8 @@ io.on('connection', (socket: Socket) => {
     let firstTokenMs: number | null = null;
     let firstAudioMs: number | null = null;
     let chunkIndex = 0;
+    // Text-to-speech bills per character, so this is the meter that matters.
+    let spokenCharacters = 0;
 
     const resumeHint = session.resumeHint;
     session.resumeHint = null;
@@ -232,6 +243,8 @@ io.on('connection', (socket: Socket) => {
 
       const audio = await tts.synthesizeSpeechFromText(chunk, signal);
       if (signal.aborted) return;
+
+      spokenCharacters += chunk.length;
 
       if (firstAudioMs === null) {
         firstAudioMs = Date.now() - startedAt;
@@ -284,6 +297,51 @@ io.on('connection', (socket: Socket) => {
       chars: text.length,
     });
 
+    const turnSpend = cost.turnCost({
+      audioSeconds: session.clipSeconds,
+      usage: {
+        promptTokens: finish.info?.promptTokens ?? 0,
+        completionTokens: finish.info?.completionTokens ?? 0,
+      },
+      spokenCharacters,
+      sttModel: process.env.GROQ_STT_MODEL || undefined,
+      llmModel: process.env.GROQ_MODEL || undefined,
+      ttsModel: process.env.GROQ_TTS_MODEL || undefined,
+    });
+
+    session.spend = cost.addCost(session.spend, turnSpend);
+    session.spendTurns += 1;
+
+    const costReport: CostReport = {
+      turn: {
+        sttUsd: turnSpend.sttUsd,
+        llmUsd: turnSpend.llmUsd,
+        ttsUsd: turnSpend.ttsUsd,
+        totalUsd: turnSpend.totalUsd,
+      },
+      session: {
+        sttUsd: session.spend.sttUsd,
+        llmUsd: session.spend.llmUsd,
+        ttsUsd: session.spend.ttsUsd,
+        totalUsd: session.spend.totalUsd,
+        turns: session.spendTurns,
+      },
+      detail: turnSpend.detail,
+    };
+
+    const share = (part: number) =>
+      turnSpend.totalUsd > 0 ? `${Math.round((part / turnSpend.totalUsd) * 100)}%` : '0%';
+
+    note('turn cost', {
+      turnId,
+      totalUsd: Number(turnSpend.totalUsd.toFixed(6)),
+      tts: `${Number(turnSpend.ttsUsd.toFixed(6))} (${share(turnSpend.ttsUsd)})`,
+      stt: `${Number(turnSpend.sttUsd.toFixed(6))} (${share(turnSpend.sttUsd)})`,
+      llm: `${Number(turnSpend.llmUsd.toFixed(6))} (${share(turnSpend.llmUsd)})`,
+      spokenCharacters,
+      billedAudioSeconds: turnSpend.detail.billedAudioSeconds,
+    });
+
     const metrics: TurnMetrics = {
       sttMs,
       firstTokenMs,
@@ -298,7 +356,7 @@ io.on('connection', (socket: Socket) => {
     );
     note('turn metrics', { turnId, ...metrics, text });
 
-    socket.emit('response:done', { turnId, text, metrics });
+    socket.emit('response:done', { turnId, text, metrics, cost: costReport });
   };
 
   /** Transcribe a recorded blob. Returns null if nothing usable was heard. */
@@ -385,6 +443,8 @@ io.on('connection', (socket: Socket) => {
     session.conversation.reset();
     session.turnId += 1;
     session.resumeHint = null;
+    session.spend = null;
+    session.spendTurns = 0;
 
     const turnId = session.turnId;
     const controller = new AbortController();
@@ -452,6 +512,8 @@ io.on('connection', (socket: Socket) => {
       trimStartMs?: number;
       /** How long the caller was actually above the speech threshold. */
       spokenMs?: number;
+      /** Length of the clip being sent, for transcription billing. */
+      clipMs?: number;
     }) => {
       try {
         if (!data?.audio) return;
@@ -463,6 +525,10 @@ io.on('connection', (socket: Socket) => {
           note('ignored audio after call end', { bytes: data.audio.byteLength });
           return;
         }
+
+        // Transcription is billed on clip length, and the response carries no
+        // duration, so the client reports what it sent.
+        session.clipSeconds = (data.clipMs ?? 0) / 1000;
 
         if (!data.duringPlayback) {
           const timeline = new Timeline();

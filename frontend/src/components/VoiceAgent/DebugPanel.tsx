@@ -3,7 +3,7 @@ import { Check, Copy, Download, X } from 'lucide-react';
 import { useBotStateStore, median, type TimelineKind } from '../../stores/useBotStateStore';
 import type { VadCalibration } from '../../hooks/useVoiceActivityDetection';
 import { diag } from '../../lib/diagnostics';
-import type { TurnMetrics } from '../../hooks/useSocketConnection';
+import type { CostReport, TurnMetrics } from '../../hooks/useSocketConnection';
 
 interface DebugPanelProps {
   open: boolean;
@@ -14,6 +14,7 @@ interface DebugPanelProps {
   peakRef: React.RefObject<number>;
   calibrationRef: React.RefObject<VadCalibration>;
   isRecording: boolean;
+  cost: CostReport | null;
 }
 
 /**
@@ -104,6 +105,14 @@ const Row = ({ label, value }: { label: string; value: React.ReactNode }) => (
 
 const ms = (value: number | null | undefined) => (value == null ? '—' : `${value} ms`);
 
+/** Per-turn figures are small fractions of a cent, so cents with three
+ *  decimals reads better than dollars with six zeroes. */
+const money = (usd: number | null | undefined) =>
+  usd == null ? '—' : `${(usd * 100).toFixed(3)}c`;
+
+const share = (part: number, total: number) =>
+  total > 0 ? `${Math.round((part / total) * 100)}%` : '—';
+
 const DebugPanel = ({
   open,
   onClose,
@@ -113,6 +122,7 @@ const DebugPanel = ({
   peakRef,
   calibrationRef,
   isRecording,
+  cost,
 }: DebugPanelProps) => {
   const { state, events, timeline, benchmarks } = useBotStateStore();
   const [copied, setCopied] = useState(false);
@@ -237,6 +247,59 @@ const DebugPanel = ({
             "audio sent" and the decision is the network round trip plus
             transcription.
           </p>
+        </section>
+
+        <section>
+          <h3 className="mb-1 text-[11px] uppercase tracking-wider text-zinc-600">Cost</h3>
+          {!cost ? (
+            <p className="text-xs text-zinc-600">No turn priced yet.</p>
+          ) : (
+            <>
+              <Row
+                label="speech synthesis"
+                value={`${money(cost.turn.ttsUsd)} · ${share(cost.turn.ttsUsd, cost.turn.totalUsd)}`}
+              />
+              <Row
+                label="transcription"
+                value={`${money(cost.turn.sttUsd)} · ${share(cost.turn.sttUsd, cost.turn.totalUsd)}`}
+              />
+              <Row
+                label="language model"
+                value={`${money(cost.turn.llmUsd)} · ${share(cost.turn.llmUsd, cost.turn.totalUsd)}`}
+              />
+              <Row label="this turn" value={money(cost.turn.totalUsd)} />
+              <Row
+                label={`call so far (${cost.session.turns} turns)`}
+                value={money(cost.session.totalUsd)}
+              />
+              <Row
+                label="per 1,000 turns"
+                value={
+                  cost.session.turns > 0
+                    ? `$${((cost.session.totalUsd / cost.session.turns) * 1000).toFixed(2)}`
+                    : '—'
+                }
+              />
+
+              <div className="mt-2 space-y-0.5 font-mono text-[11px] text-zinc-600">
+                <div>
+                  audio {cost.detail.actualAudioSeconds}s sent · {cost.detail.billedAudioSeconds}s
+                  billed
+                </div>
+                <div>
+                  tokens {cost.detail.promptTokens} in / {cost.detail.completionTokens} out ·{' '}
+                  {cost.detail.spokenCharacters} chars spoken
+                </div>
+              </div>
+
+              <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
+                Transcription bills a ten-second minimum per request, so a short
+                clip costs the same as a long one — trimming helps accuracy, not
+                spend. Synthesis bills per character, which is why a wordier
+                answer costs more than a longer conversation.
+              </p>
+            </>
+          )}
         </section>
 
         <section>

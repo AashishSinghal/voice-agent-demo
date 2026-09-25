@@ -88,6 +88,9 @@ function buildUserPrompt(query: string, history: Turn[], resumeHint?: string | n
 export interface FinishInfo {
   reason: string | null;
   tokens: number;
+  /** Billable usage, when the provider reports it. */
+  promptTokens: number;
+  completionTokens: number;
 }
 
 export async function* streamResponse(
@@ -140,12 +143,23 @@ async function* streamFromGroq(
 
   let finishReason: string | null = null;
   let tokens = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
 
   for await (const chunk of stream) {
     if (signal.aborted) return;
 
     const choice = chunk.choices[0];
     if (choice?.finish_reason) finishReason = choice.finish_reason;
+
+    // Groq attaches billable usage to the final chunk under x_groq rather than
+    // requiring stream_options, so a streamed call can still be costed.
+    const usage = (chunk as { x_groq?: { usage?: { prompt_tokens?: number; completion_tokens?: number } } })
+      .x_groq?.usage;
+    if (usage) {
+      promptTokens = usage.prompt_tokens ?? promptTokens;
+      completionTokens = usage.completion_tokens ?? completionTokens;
+    }
 
     const token = choice?.delta?.content;
     if (token) {
@@ -157,7 +171,7 @@ async function* streamFromGroq(
   // Without this a truncated answer and a deliberate stop look identical.
   // "length" means max_tokens; "stop" means the model chose to end; null means
   // the stream ended without saying why, which points at the transport.
-  onFinish?.({ reason: finishReason, tokens });
+  onFinish?.({ reason: finishReason, tokens, promptTokens, completionTokens });
 }
 
 async function* streamFromOllama(
@@ -206,7 +220,12 @@ async function* streamFromOllama(
           yield parsed.response as string;
         }
         if (parsed.done) {
-          onFinish?.({ reason: parsed.done_reason ?? 'done', tokens });
+          onFinish?.({
+            reason: parsed.done_reason ?? 'done',
+            tokens,
+            promptTokens: parsed.prompt_eval_count ?? 0,
+            completionTokens: parsed.eval_count ?? 0,
+          });
           return;
         }
       } catch {

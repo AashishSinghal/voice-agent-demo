@@ -32,3 +32,27 @@ export interface TurnMetrics {
   totalMs: number;
   chunks: number;
 }
+
+/** USD for one turn and for the call so far, with the inputs behind them. */
+export interface CostReport {
+  turn: {
+    sttUsd: number;
+    llmUsd: number;
+    ttsUsd: number;
+    totalUsd: number;
+  };
+  session: {
+    sttUsd: number;
+    llmUsd: number;
+    ttsUsd: number;
+    totalUsd: number;
+    turns: number;
+  };
+  detail: {
+    billedAudioSeconds: number;
+    actualAudioSeconds: number;
+    promptTokens: number;
+    completionTokens: number;
+    spokenCharacters: number;
+  };
+}

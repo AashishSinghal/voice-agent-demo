@@ -136,6 +136,7 @@ const VoiceAgent = () => {
     spokenChunks: 0,
     trimStartMs: 0,
     spokenMs: 0,
+    clipMs: 0,
   });
 
   const notifyCompleteRef = useRef<(turnId: number) => void>(() => {});
@@ -148,6 +149,7 @@ const VoiceAgent = () => {
     connected,
     messages,
     metrics,
+    costReport,
     sendAudio,
     startCall,
     endCall,
@@ -328,14 +330,19 @@ const VoiceAgent = () => {
     markTimeline('caller stopped');
 
     // Snapshot everything the send depends on, before anything can restart.
+    const trimStartMs = Math.max(
+      0,
+      Math.round(speechStartedAtRef.current - recordingStartedAtRef.current - PREROLL_MS)
+    );
+
     pendingSendRef.current = {
       duringPlayback: bargeRef.current,
       spokenChunks: spokenAtBargeRef.current,
-      trimStartMs: Math.max(
-        0,
-        Math.round(speechStartedAtRef.current - recordingStartedAtRef.current - PREROLL_MS)
-      ),
+      trimStartMs,
       spokenMs,
+      // What the server will actually send for transcription, which is what
+      // gets billed. The transcription response carries no duration.
+      clipMs: Math.max(0, Math.round(Date.now() - recordingStartedAtRef.current - trimStartMs)),
     };
 
     trace('speech end', bargeRef.current ? 'sending over-speech' : 'sending turn');
@@ -485,6 +492,7 @@ const VoiceAgent = () => {
         peakRef={peakRef}
         calibrationRef={calibrationRef}
         isRecording={recorder.isRecording}
+        cost={costReport}
       />
     </div>
   );
