@@ -51,6 +51,11 @@ export const useAudioPlayback = ({
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  /**
+   * A second tap on the same graph, exposed as a MediaStream so the agent's
+   * voice can be recorded separately from the caller's.
+   */
+  const outputTapRef = useRef<MediaStreamAudioDestinationNode | null>(null);
 
   const ensureGraph = useCallback(() => {
     if (!audioContextRef.current) {
@@ -60,8 +65,14 @@ export const useAudioPlayback = ({
       analyser.smoothingTimeConstant = 0.75;
       analyser.connect(context.destination);
 
+      // Recording tap. Connected in parallel with the speakers, so capturing
+      // never changes what the caller hears.
+      const tap = context.createMediaStreamDestination();
+      analyser.connect(tap);
+
       audioContextRef.current = context;
       analyserRef.current = analyser;
+      outputTapRef.current = tap;
     }
 
     // Autoplay policy can leave the context suspended; without this the audio
@@ -339,6 +350,10 @@ export const useAudioPlayback = ({
   return {
     /** Live spectrum of the agent's voice, for the visualiser. */
     outputAnalyserRef: analyserRef,
+    /** The agent's voice as a MediaStream, for recording. */
+    outputTapRef,
+    /** Build the audio graph now rather than on first playback. */
+    ensureGraph,
     enqueue,
     markTurnComplete,
     pause,

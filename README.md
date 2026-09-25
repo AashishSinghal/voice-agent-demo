@@ -232,6 +232,22 @@ environment variable; the call site is identical.
 
 ---
 
+## Building evaluation data
+
+The debug panel can record a call as **two separate tracks** — the caller on
+one, the agent on the other. A mixed recording is useless for evaluation: you
+cannot tell which voice you are scoring, and the interesting moments are
+exactly the ones where both are talking.
+
+Both tracks start together, so they align with each other and with the
+diagnostic log, which already carries the transcript, the interruption
+classification and the per-stage timings for every turn. Audio plus that log is
+a labelled row: input audio, what was heard, what the agent decided, how long
+it took.
+
+It is off by default, stays in the browser, and is never uploaded — recording
+someone's voice on a public URL is something they opt into.
+
 ## Tests
 
 ```bash

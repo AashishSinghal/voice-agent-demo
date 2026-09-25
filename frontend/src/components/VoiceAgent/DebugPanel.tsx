@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, Download, X } from 'lucide-react';
+import { Check, Copy, Download, Mic, X } from 'lucide-react';
 import { useBotStateStore, median, type TimelineKind } from '../../stores/useBotStateStore';
 import type { VadCalibration } from '../../hooks/useVoiceActivityDetection';
 import { diag } from '../../lib/diagnostics';
+import type { ConversationRecording } from '../../hooks/useConversationRecorder';
 import type { CostReport, TurnMetrics } from '../../hooks/useSocketConnection';
 
 interface DebugPanelProps {
@@ -15,6 +16,10 @@ interface DebugPanelProps {
   calibrationRef: React.RefObject<VadCalibration>;
   isRecording: boolean;
   cost: CostReport | null;
+  recordCall: boolean;
+  onToggleRecordCall: (enabled: boolean) => void;
+  conversationRecording: ConversationRecording | null;
+  isRecordingCall: boolean;
 }
 
 /**
@@ -113,6 +118,17 @@ const money = (usd: number | null | undefined) =>
 const share = (part: number, total: number) =>
   total > 0 ? `${Math.round((part / total) * 100)}%` : '—';
 
+const saveBlob = (blob: Blob, name: string) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+const kb = (blob: Blob | null) => (blob ? `${Math.round(blob.size / 1024)} KB` : '—');
+
 const DebugPanel = ({
   open,
   onClose,
@@ -123,6 +139,10 @@ const DebugPanel = ({
   calibrationRef,
   isRecording,
   cost,
+  recordCall,
+  onToggleRecordCall,
+  conversationRecording,
+  isRecordingCall,
 }: DebugPanelProps) => {
   const { state, events, timeline, benchmarks } = useBotStateStore();
   const [copied, setCopied] = useState(false);
@@ -247,6 +267,71 @@ const DebugPanel = ({
             "audio sent" and the decision is the network round trip plus
             transcription.
           </p>
+        </section>
+
+        <section>
+          <h3 className="mb-2 text-[11px] uppercase tracking-wider text-zinc-600">
+            Record this call
+          </h3>
+
+          <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-400">
+            <input
+              type="checkbox"
+              checked={recordCall}
+              disabled={isRecordingCall}
+              onChange={(event) => onToggleRecordCall(event.target.checked)}
+              className="h-3.5 w-3.5 accent-emerald-400 disabled:opacity-40"
+            />
+            Capture both voices as separate tracks
+            {isRecordingCall && <span className="text-emerald-400">· recording</span>}
+          </label>
+
+          <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
+            Off by default. The audio stays in this browser and is never
+            uploaded — it is saved only when you click below. Takes effect on
+            the next call.
+          </p>
+
+          {conversationRecording && (
+            <div className="mt-3 space-y-2">
+              <div className="flex gap-2">
+                <button
+                  onClick={() =>
+                    conversationRecording.callerBlob &&
+                    saveBlob(
+                      conversationRecording.callerBlob,
+                      `call-${conversationRecording.startedAt}-you.webm`
+                    )
+                  }
+                  disabled={!conversationRecording.callerBlob}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-300 transition hover:bg-white/5 disabled:opacity-40"
+                >
+                  <Mic className="h-3.5 w-3.5" />
+                  You · {kb(conversationRecording.callerBlob)}
+                </button>
+                <button
+                  onClick={() =>
+                    conversationRecording.agentBlob &&
+                    saveBlob(
+                      conversationRecording.agentBlob,
+                      `call-${conversationRecording.startedAt}-agent.webm`
+                    )
+                  }
+                  disabled={!conversationRecording.agentBlob}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded border border-white/10 px-2 py-1.5 text-xs text-zinc-300 transition hover:bg-white/5 disabled:opacity-40"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Agent · {kb(conversationRecording.agentBlob)}
+                </button>
+              </div>
+              <p className="text-[11px] leading-relaxed text-zinc-600">
+                {(conversationRecording.durationMs / 1000).toFixed(1)}s. Both
+                tracks start together, so they line up with each other and with
+                the diagnostic log — which carries the transcripts and
+                classifications that turn them into labelled evaluation data.
+              </p>
+            </div>
+          )}
         </section>
 
         <section>

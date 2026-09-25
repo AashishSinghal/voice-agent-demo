@@ -3,6 +3,7 @@ import { Mic, PhoneOff, SlidersHorizontal } from 'lucide-react';
 import { useAudioRecorder } from '../../hooks/useAudioRecorder';
 import { useAudioPlayback } from '../../hooks/useAudioPlayback';
 import { useMicStream } from '../../hooks/useMicStream';
+import { useConversationRecorder } from '../../hooks/useConversationRecorder';
 import { useSocketConnection } from '../../hooks/useSocketConnection';
 import { useVoiceActivityDetection } from '../../hooks/useVoiceActivityDetection';
 import { useBotStateStore, type CallState } from '../../stores/useBotStateStore';
@@ -82,6 +83,14 @@ const CAPTION: Record<CallState, string> = {
 const VoiceAgent = () => {
   const [isCallActive, setIsCallActive] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
+
+  /**
+   * Off by default and never uploaded. This runs on a public URL, so recording
+   * a visitor's voice is something they opt into, not something that happens
+   * because the audio would be useful to us.
+   */
+  const [recordCall, setRecordCall] = useState(false);
+  const conversationRecorder = useConversationRecorder();
 
   const {
     state,
@@ -387,19 +396,28 @@ const VoiceAgent = () => {
       idleRecycleMs: IDLE_RECYCLE_MS,
     });
     diag.log('client', 'call started');
+
+    if (recordCall) {
+      // Build the playback graph now so the agent's track exists from the
+      // first word rather than from the first chunk played.
+      playback.ensureGraph();
+      conversationRecorder.start(micStream, playback.outputTapRef.current?.stream ?? null);
+    }
+
     setIsCallActive(true);
     startCall();
-  }, [acquire, startCall]);
+  }, [acquire, startCall, recordCall, conversationRecorder, playback]);
 
   const handleEnd = useCallback(() => {
     recorder.discardRecording();
+    void conversationRecorder.stop();
     playback.stop();
     release();
     setIsCallActive(false);
     // endCall clears the transcript, metrics and call state together, so the
     // next call starts from the same blank slate as the first.
     endCall();
-  }, [recorder, playback, release, endCall]);
+  }, [recorder, playback, release, endCall, conversationRecorder]);
 
   /**
    * While audio is playing the client otherwise sends nothing, so a 26-second
@@ -493,6 +511,10 @@ const VoiceAgent = () => {
         calibrationRef={calibrationRef}
         isRecording={recorder.isRecording}
         cost={costReport}
+        recordCall={recordCall}
+        onToggleRecordCall={setRecordCall}
+        conversationRecording={conversationRecorder.recording}
+        isRecordingCall={conversationRecorder.isRecording}
       />
     </div>
   );
