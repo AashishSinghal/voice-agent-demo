@@ -266,6 +266,18 @@ it took.
 It is off by default, stays in the browser, and is never uploaded — recording
 someone's voice on a public URL is something they opt into.
 
+An importer turns a downloaded bundle into a corpus entry:
+
+```bash
+cd backend && npm run import:call -- ~/Downloads/voice-agent-<id>.zip
+```
+
+It joins the log to the audio — a clip's byte count appears on both the send
+and its transcript, which makes the join reliable — and cuts one clip per
+utterance, labelled with what was heard, how it was classified and how long
+each stage took. The only manual step left is correcting transcripts that were
+wrong, which is editing rather than transcribing. See [eval/](./eval).
+
 ## Tests
 
 ```bash

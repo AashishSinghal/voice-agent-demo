@@ -4,6 +4,7 @@ import { installLogBridge, subscribeToLogs, type LogLine } from './services/logB
 import { explainGroqTtsFailure } from './services/ttsService.js';
 import Groq from 'groq-sdk';
 import * as cost from './services/cost.js';
+import { parseCall } from './eval/parseDiagnostics.js';
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -194,6 +195,54 @@ const twice = cost.addCost(turn, turn);
 check('session total accumulates', Number(twice.totalUsd.toFixed(8)), Number((turn.totalUsd * 2).toFixed(8)));
 check('session characters accumulate', twice.detail.spokenCharacters, 806);
 check('first turn seeds the session', cost.addCost(null, turn).totalUsd, turn.totalUsd);
+
+console.log('\n--- diagnostics parse into labelled utterances ---');
+
+// Shaped exactly like an exported log, including the lines that must be ignored.
+const FIXTURE = [
+  '   0.33s audio      conversation recording started {"agentTrack":true}',
+  '   2.91s vad        speech end {"silenceWindowMs":900}',
+  '   8.63s vad        speech start {"rms":0.057,"threshold":0.0161,"floor":0.0054}',
+  '  10.89s vad        speech end {"silenceWindowMs":900}',
+  '  10.89s socket-out audio:input {"bytes":168380,"duringPlayback":false,"spokenMs":1359,"clipMs":2959,"trimStartMs":7594}',
+  '  11.10s server     [abc123] -> response:text:delta turnId=2 token="Software"',
+  '  12.40s server     · transcript {"ms":789,"text":"Explain Software Engineering.","bytes":168380}',
+  '  20.10s vad        speech start {"rms":0.04,"threshold":0.016,"floor":0.005}',
+  '  21.00s vad        speech end {"silenceWindowMs":450}',
+  '  21.00s socket-out audio:input {"bytes":61154,"duringPlayback":true,"spokenMs":1350,"clipMs":1800,"trimStartMs":1305}',
+  '  22.00s server     · transcript {"ms":600,"text":"Thank you.","bytes":61154}',
+  '  22.01s server     · discarded over-speech {"text":"Thank you.","spokenMs":1350}',
+  '  22.02s server     · classification {"kind":"backchannel","normalised":"","spokenChunks":1}',
+  '  57.49s audio      conversation recording stopped {"callerBytes":918293,"durationMs":57162}',
+].join('\n');
+
+const parsed = parseCall(FIXTURE);
+
+check('recording start located', parsed.recordingStartedAt, 0.33);
+check('recording duration located', parsed.recordingDurationMs, 57162);
+check('both sends found', parsed.utterances.length, 2);
+
+const [reply, overSpeech] = parsed.utterances;
+
+check('transcript joined by byte count', reply.transcript, 'Explain Software Engineering.');
+check('transcription time captured', reply.sttMs, 789);
+check('normal turn not flagged as over-speech', reply.overSpeech, false);
+// speech 8.63 -> 10.89 minus the 900ms window, both padded, relative to 0.33
+check('clip start derived from speech onset', Number(reply.audio!.startSec.toFixed(2)), 8.0);
+check('clip end excludes the silence window', Number(reply.audio!.endSec.toFixed(2)), 9.96);
+
+check('over-speech flagged', overSpeech.overSpeech, true);
+check('classification attached', overSpeech.classification, 'backchannel');
+check('discard recorded', overSpeech.discarded, true);
+// speech ends 21.00, minus the 450ms window, minus the 0.33 recording start,
+// plus 0.3 padding — a tighter window than the 900ms used for a normal turn.
+check('a tighter window is respected', Number(overSpeech.audio!.endSec.toFixed(2)), 20.52);
+
+// Trace lines carry no JSON payload and must not become events.
+check('payload-less trace lines ignored', parsed.events.some((e) => e.name.includes('response:text:delta')), false);
+
+// A silent stretch fires speech-end without a send; it must not invent an utterance.
+check('unpaired speech-end ignored', parsed.utterances.every((u) => u.bytes > 0), true);
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

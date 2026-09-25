@@ -82,3 +82,8 @@ lerna-debug.log*
 # Misc
 .eslintcache
 .stylelintcache
+
+# Evaluation corpus: labels are committed, the audio is not.
+# Recordings are someone's voice and grow without bound; the labels are small
+# and still drive the text-level scoring on their own.
+eval/corpus/**/*.webm

@@ -1,0 +1,30 @@
+{
+  "callId": "1790375204729",
+  "importedFrom": "voice-agent-1790375204729.zip",
+  "recordingDurationMs": 57162,
+  "hasAudio": true,
+  "counts": {
+    "turn": 1
+  },
+  "entries": [
+    {
+      "index": 0,
+      "clip": "clips/000-turn.webm",
+      "label": "turn",
+      "overSpeech": false,
+      "transcript": "Explain Software Engineering.",
+      "transcriptVerified": false,
+      "classification": null,
+      "discarded": false,
+      "discardReason": null,
+      "spokenMs": 1359,
+      "clipMs": 2959,
+      "trimStartMs": 7594,
+      "sttMs": 789,
+      "audio": {
+        "startSec": 8,
+        "endSec": 9.96
+      }
+    }
+  ]
+}
