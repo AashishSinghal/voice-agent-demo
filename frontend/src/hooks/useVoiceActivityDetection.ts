@@ -206,5 +206,12 @@ export const useVoiceActivityDetection = (
     };
   }, [audioStream, enabled, check]);
 
-  return { levelRef, peakRef, calibrationRef, lastVoiceAtRef };
+  return {
+    levelRef,
+    peakRef,
+    calibrationRef,
+    lastVoiceAtRef,
+    /** Live spectrum of the caller's voice, for the visualiser. */
+    inputAnalyserRef: analyserRef,
+  };
 };

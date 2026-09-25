@@ -40,6 +40,39 @@ export const useAudioPlayback = ({
   /** Most recent turn we have been sent audio for, played or not. */
   const latestTurnRef = useRef<number | null>(null);
 
+  /**
+   * Web Audio graph for the agent's own voice.
+   *
+   * Every chunk is routed element -> analyser -> speakers, so the visualiser
+   * can read the waveform actually coming out rather than animating a guess.
+   * The context is created lazily on first playback, which is always after a
+   * user gesture, so it is never blocked from starting.
+   */
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+
+  const ensureGraph = useCallback(() => {
+    if (!audioContextRef.current) {
+      const context = new AudioContext();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.75;
+      analyser.connect(context.destination);
+
+      audioContextRef.current = context;
+      analyserRef.current = analyser;
+    }
+
+    // Autoplay policy can leave the context suspended; without this the audio
+    // is routed into a graph that is not running and nothing is heard.
+    if (audioContextRef.current.state === 'suspended') {
+      void audioContextRef.current.resume();
+    }
+
+    return analyserRef.current;
+  }, []);
+
   const [isPlaying, setIsPlaying] = useState(false);
 
   const onTurnPlayedRef = useRef(onTurnPlayed);
@@ -50,6 +83,12 @@ export const useAudioPlayback = ({
   }, [onTurnPlayed, onBlocked]);
 
   const releaseCurrent = useCallback(() => {
+    // A MediaElementSource can only be created once per element, so each one
+    // is disconnected before its element is dropped.
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+      sourceRef.current = null;
+    }
     if (audioRef.current) {
       audioRef.current.onended = null;
       audioRef.current.onerror = null;
@@ -94,6 +133,19 @@ export const useAudioPlayback = ({
     urlRef.current = url;
     audioRef.current = audio;
     activeTurnRef.current = next.turnId;
+
+    try {
+      const analyser = ensureGraph();
+      if (analyser && audioContextRef.current) {
+        const source = audioContextRef.current.createMediaElementSource(audio);
+        source.connect(analyser);
+        sourceRef.current = source;
+      }
+    } catch (err) {
+      // If the graph cannot be built the element still plays on its own; the
+      // visualiser just has nothing to read. Never lose audio over decoration.
+      diag.log('audio', 'analyser unavailable', { message: String(err) });
+    }
 
     const startedAt = performance.now();
 
@@ -274,9 +326,19 @@ export const useAudioPlayback = ({
     chunksPlayedRef.current = 0;
   }, []);
 
-  useEffect(() => releaseCurrent, [releaseCurrent]);
+  useEffect(
+    () => () => {
+      releaseCurrent();
+      void audioContextRef.current?.close();
+      audioContextRef.current = null;
+      analyserRef.current = null;
+    },
+    [releaseCurrent]
+  );
 
   return {
+    /** Live spectrum of the agent's voice, for the visualiser. */
+    outputAnalyserRef: analyserRef,
     enqueue,
     markTurnComplete,
     pause,

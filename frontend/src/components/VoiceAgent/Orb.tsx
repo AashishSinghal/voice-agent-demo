@@ -3,122 +3,182 @@ import type { CallState } from '../../stores/useBotStateStore';
 
 interface OrbProps {
   state: CallState;
-  /** Live mic level, 0..1. Read every frame; deliberately not React state. */
-  levelRef: React.RefObject<number>;
+  /** Spectrum of the caller's microphone. */
+  inputAnalyserRef: React.RefObject<AnalyserNode | null>;
+  /** Spectrum of the agent's voice as it plays. */
+  outputAnalyserRef: React.RefObject<AnalyserNode | null>;
 }
 
-/** Per-state palette. Two stops so the orb has depth rather than a flat fill. */
-const PALETTE: Record<CallState, { from: string; to: string; glow: string }> = {
-  idle: { from: '#3f3f46', to: '#18181b', glow: 'rgba(113,113,122,0.25)' },
-  listening: { from: '#34d399', to: '#059669', glow: 'rgba(52,211,153,0.45)' },
-  thinking: { from: '#a78bfa', to: '#6d28d9', glow: 'rgba(167,139,250,0.45)' },
-  speaking: { from: '#60a5fa', to: '#1d4ed8', glow: 'rgba(96,165,250,0.5)' },
-  paused: { from: '#fbbf24', to: '#b45309', glow: 'rgba(251,191,36,0.45)' },
-  ended: { from: '#52525b', to: '#27272a', glow: 'rgba(82,82,91,0.2)' },
+interface Palette {
+  core: string;
+  edge: string;
+  glow: string;
+}
+
+const PALETTE: Record<CallState, Palette> = {
+  idle: { core: '#52525b', edge: '#18181b', glow: 'rgba(113,113,122,0.20)' },
+  listening: { core: '#34d399', edge: '#065f46', glow: 'rgba(52,211,153,0.40)' },
+  thinking: { core: '#a78bfa', edge: '#4c1d95', glow: 'rgba(167,139,250,0.40)' },
+  speaking: { core: '#60a5fa', edge: '#1e3a8a', glow: 'rgba(96,165,250,0.45)' },
+  paused: { core: '#fbbf24', edge: '#92400e', glow: 'rgba(251,191,36,0.40)' },
+  ended: { core: '#3f3f46', edge: '#18181b', glow: 'rgba(63,63,70,0.15)' },
 };
 
+const SIZE = 260;
+const BASE_RADIUS = 74;
+/** Points around the ring. Enough to read as a curve, few enough to stay smooth. */
+const POINTS = 128;
+/** Speech energy lives low in the spectrum; the top bins are mostly empty. */
+const USED_BIN_FRACTION = 0.45;
+
+const lerp = (from: number, to: number, t: number) => from + (to - from) * t;
+
 /**
- * The single visual anchor of the interface.
+ * Audio-reactive orb.
  *
- * Scale and glow are driven from an animation frame writing CSS custom
- * properties, rather than from React state — mic level updates ~60 times a
- * second and re-rendering at that rate would be wasteful and janky.
+ * Deforms against the live spectrum of whichever side is talking, read from a
+ * real AnalyserNode rather than approximated — so the movement lines up with
+ * what is actually being heard.
+ *
+ * The shape is built by mapping frequency bins around half the circle and
+ * mirroring them, which keeps it symmetric and organic instead of noisy. Radii
+ * are eased toward their targets each frame so loud transients bloom rather
+ * than snap, and everything is drawn on a canvas because this runs at 60fps
+ * and has no business touching React state.
  */
-const Orb = ({ state, levelRef }: OrbProps) => {
-  const orbRef = useRef<HTMLDivElement>(null);
-  const smoothed = useRef(0);
+const Orb = ({ state, inputAnalyserRef, outputAnalyserRef }: OrbProps) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const radiiRef = useRef<number[]>(new Array(POINTS).fill(BASE_RADIUS));
+  const paletteRef = useRef<Palette>(PALETTE.idle);
+  const stateRef = useRef<CallState>(state);
+
+  stateRef.current = state;
 
   useEffect(() => {
-    let frame: number;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-    const tick = () => {
-      // Only the caller's voice should push the orb around; while the agent
-      // speaks, a gentle idle pulse reads better than reacting to its own audio.
-      // levelRef is time-domain RMS: ~0.05-0.3 for speech. Normalise to 0..1
-      // so the orb reacts across the useful range.
-      const target =
-        state === 'listening' || state === 'paused'
-          ? Math.min(1, (levelRef.current ?? 0) / 0.25)
-          : 0;
-      smoothed.current += (target - smoothed.current) * 0.18;
+    const context = canvas.getContext('2d');
+    if (!context) return;
 
-      const breath =
-        state === 'speaking' ? 0.04 * Math.sin(Date.now() / 260) :
-        state === 'thinking' ? 0.03 * Math.sin(Date.now() / 420) : 0;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = SIZE * dpr;
+    canvas.height = SIZE * dpr;
+    context.scale(dpr, dpr);
 
-      const scale = 1 + smoothed.current * 0.28 + breath;
+    const centre = SIZE / 2;
+    let frame = 0;
 
-      if (orbRef.current) {
-        orbRef.current.style.setProperty('--orb-scale', scale.toFixed(3));
-        orbRef.current.style.setProperty(
-          '--orb-glow-size',
-          `${(38 + smoothed.current * 70 + Math.abs(breath) * 180).toFixed(0)}px`
-        );
+    const draw = () => {
+      const current = stateRef.current;
+      const target = PALETTE[current];
+
+      // Ease the palette so a state change is a wash rather than a jump.
+      paletteRef.current = target;
+
+      // Only one side talks at a time; read whichever that is.
+      const analyser =
+        current === 'speaking'
+          ? outputAnalyserRef.current
+          : current === 'listening' || current === 'paused'
+            ? inputAnalyserRef.current
+            : null;
+
+      let spectrum: Uint8Array<ArrayBuffer> | null = null;
+      if (analyser) {
+        spectrum = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+        analyser.getByteFrequencyData(spectrum);
       }
-      frame = requestAnimationFrame(tick);
+
+      const usable = spectrum ? Math.floor(spectrum.length * USED_BIN_FRACTION) : 0;
+      const now = performance.now();
+      const radii = radiiRef.current;
+
+      for (let i = 0; i < POINTS; i++) {
+        // Mirror the first half across the second so the blob stays symmetric.
+        const mirrored = i < POINTS / 2 ? i : POINTS - i - 1;
+        const binIndex = usable ? Math.floor((mirrored / (POINTS / 2)) * usable) : 0;
+        const energy = spectrum && usable ? spectrum[binIndex] / 255 : 0;
+
+        // A slow drift keeps the shape alive when nothing is playing.
+        const idleWave =
+          Math.sin(now / 900 + (i / POINTS) * Math.PI * 4) * (current === 'idle' ? 1.4 : 2.4);
+
+        const wanted = BASE_RADIUS + energy * 46 + idleWave;
+        radii[i] = lerp(radii[i], wanted, 0.22);
+      }
+
+      context.clearRect(0, 0, SIZE, SIZE);
+
+      // --- halo ---
+      const haloRadius = Math.max(...radii) + 34;
+      const halo = context.createRadialGradient(centre, centre, BASE_RADIUS * 0.4, centre, centre, haloRadius);
+      halo.addColorStop(0, target.glow);
+      halo.addColorStop(1, 'rgba(0,0,0,0)');
+      context.fillStyle = halo;
+      context.beginPath();
+      context.arc(centre, centre, haloRadius, 0, Math.PI * 2);
+      context.fill();
+
+      // --- body, as a closed curve through the deformed radii ---
+      context.beginPath();
+      for (let i = 0; i <= POINTS; i++) {
+        const index = i % POINTS;
+        const nextIndex = (i + 1) % POINTS;
+        const angle = (index / POINTS) * Math.PI * 2 - Math.PI / 2;
+        const nextAngle = (nextIndex / POINTS) * Math.PI * 2 - Math.PI / 2;
+
+        const x = centre + Math.cos(angle) * radii[index];
+        const y = centre + Math.sin(angle) * radii[index];
+        const nx = centre + Math.cos(nextAngle) * radii[nextIndex];
+        const ny = centre + Math.sin(nextAngle) * radii[nextIndex];
+
+        if (i === 0) context.moveTo(x, y);
+        // Midpoint quadratics round off the joins between samples.
+        context.quadraticCurveTo(x, y, (x + nx) / 2, (y + ny) / 2);
+      }
+      context.closePath();
+
+      const body = context.createRadialGradient(
+        centre - 18,
+        centre - 22,
+        6,
+        centre,
+        centre,
+        BASE_RADIUS + 48
+      );
+      body.addColorStop(0, target.core);
+      body.addColorStop(1, target.edge);
+      context.fillStyle = body;
+      context.fill();
+
+      // --- specular highlight ---
+      const highlight = context.createRadialGradient(
+        centre - 24,
+        centre - 30,
+        2,
+        centre - 24,
+        centre - 30,
+        40
+      );
+      highlight.addColorStop(0, 'rgba(255,255,255,0.32)');
+      highlight.addColorStop(1, 'rgba(255,255,255,0)');
+      context.fillStyle = highlight;
+      context.fill();
+
+      frame = requestAnimationFrame(draw);
     };
 
-    frame = requestAnimationFrame(tick);
+    frame = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(frame);
-  }, [state, levelRef]);
-
-  const palette = PALETTE[state];
+  }, [inputAnalyserRef, outputAnalyserRef]);
 
   return (
-    <div className="relative flex items-center justify-center" style={{ width: 260, height: 260 }}>
-      {/* halo */}
-      <div
-        className="absolute rounded-full blur-3xl transition-colors duration-700"
-        style={{ width: 240, height: 240, background: palette.glow }}
-      />
-
-      {/* rotating ring, only while the agent is working */}
-      <div
-        className="absolute rounded-full transition-opacity duration-500"
-        style={{
-          width: 210,
-          height: 210,
-          // Per-side longhand only. `border` and `borderColor` are both
-          // shorthands, and mixing either with borderTopColor makes React warn
-          // about conflicting style updates on re-render.
-          borderWidth: 1,
-          borderStyle: 'solid',
-          borderTopColor: 'transparent',
-          borderRightColor: palette.from,
-          borderBottomColor: palette.from,
-          borderLeftColor: palette.from,
-          opacity: state === 'thinking' ? 0.55 : 0.15,
-          animation: state === 'thinking' ? 'orb-spin 2.4s linear infinite' : 'none',
-        }}
-      />
-
-      <div
-        ref={orbRef}
-        className="relative rounded-full transition-colors duration-700"
-        style={{
-          width: 168,
-          height: 168,
-          background: `radial-gradient(circle at 34% 30%, ${palette.from}, ${palette.to} 72%)`,
-          boxShadow: `0 0 var(--orb-glow-size, 40px) ${palette.glow}, inset 0 -18px 40px rgba(0,0,0,0.45)`,
-          transform: 'scale(var(--orb-scale, 1))',
-          willChange: 'transform',
-        }}
-      >
-        {/* highlight */}
-        <div
-          className="absolute rounded-full"
-          style={{
-            top: '16%',
-            left: '22%',
-            width: '32%',
-            height: '24%',
-            background:
-              'radial-gradient(ellipse at center, rgba(255,255,255,0.4), rgba(255,255,255,0) 70%)',
-            filter: 'blur(3px)',
-          }}
-        />
-      </div>
-    </div>
+    <canvas
+      ref={canvasRef}
+      style={{ width: SIZE, height: SIZE }}
+      aria-hidden
+    />
   );
 };
 

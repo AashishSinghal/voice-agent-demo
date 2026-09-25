@@ -144,6 +144,7 @@ const VoiceAgent = () => {
     startCall,
     endCall,
     notifyBarge,
+    cancelBarge,
     notifyPlaybackComplete,
   } = useSocketConnection(SERVER_URL, {
     onAudioChunk: (chunk) => playback.enqueue(chunk),
@@ -303,6 +304,15 @@ const VoiceAgent = () => {
       // invites a hallucinated transcript, so recycle instead.
       trace('discarded utterance', `only ${spokenMs}ms audible`);
       recorder.discardRecording();
+
+      // If this false alarm had paused the agent mid-sentence, pick it back up
+      // rather than leaving the call waiting for audio that is never coming.
+      if (bargeRef.current) {
+        bargeRef.current = false;
+        trace('resuming', 'over-speech contained no speech');
+        playback.resume();
+        cancelBarge('no speech detected');
+      }
       return;
     }
 
@@ -326,16 +336,20 @@ const VoiceAgent = () => {
     if (!bargeRef.current) setCallState('thinking', 'optimistic (audio sent)');
 
     recorder.stopRecording();
-  }, [recorder, trace, setUserSpeaking, markTimeline, setCallState]);
+  }, [recorder, trace, setUserSpeaking, markTimeline, setCallState, playback, cancelBarge]);
 
-  const { levelRef, peakRef, calibrationRef } = useVoiceActivityDetection(stream, isCallActive, {
-    onSpeechStart: handleSpeechStart,
-    onSpeechEnd: handleSpeechEnd,
-    silenceDuration: state === 'paused' ? ENDPOINT_OVER_SPEECH_MS : ENDPOINT_MS,
-    speechDuration: 250,
-    speechFactor: SPEECH_FACTOR,
-    silenceFactor: SILENCE_FACTOR,
-  });
+  const { levelRef, peakRef, calibrationRef, inputAnalyserRef } = useVoiceActivityDetection(
+    stream,
+    isCallActive,
+    {
+      onSpeechStart: handleSpeechStart,
+      onSpeechEnd: handleSpeechEnd,
+      silenceDuration: state === 'paused' ? ENDPOINT_OVER_SPEECH_MS : ENDPOINT_MS,
+      speechDuration: 250,
+      speechFactor: SPEECH_FACTOR,
+      silenceFactor: SILENCE_FACTOR,
+    }
+  );
 
   const handleStart = useCallback(async () => {
     diag.reset();
@@ -375,8 +389,6 @@ const VoiceAgent = () => {
 
   return (
     <div className="relative flex h-screen flex-col bg-zinc-950 text-zinc-100">
-      <style>{`@keyframes orb-spin { to { transform: rotate(360deg); } }`}</style>
-
       <header className="flex items-center justify-between px-6 py-5">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium tracking-tight text-zinc-300">Voice Agent</span>
@@ -395,7 +407,11 @@ const VoiceAgent = () => {
       </header>
 
       <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-6">
-        <Orb state={state} levelRef={levelRef} />
+        <Orb
+          state={state}
+          inputAnalyserRef={inputAnalyserRef}
+          outputAnalyserRef={playback.outputAnalyserRef}
+        />
 
         <div className="h-6 text-center">
           <p className="text-sm text-zinc-400">

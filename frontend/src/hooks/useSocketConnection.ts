@@ -305,6 +305,16 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     socketRef.current?.emit('barge:detected', { turnId, chunksPlayed });
   }, []);
 
+  /**
+   * The over-speech turned out to be nothing — a cough, a chair, a false
+   * trigger. Tell the server to carry on rather than leaving the call paused
+   * waiting for audio that is never coming.
+   */
+  const cancelBarge = useCallback((reason: string) => {
+    diag.log('socket-out', 'barge:cancelled', { reason });
+    socketRef.current?.emit('barge:cancelled', { reason });
+  }, []);
+
   const notifyPlaybackComplete = useCallback((turnId: number) => {
     diag.log('socket-out', 'playback:complete', { turnId });
     socketRef.current?.emit('playback:complete', { turnId });
@@ -319,6 +329,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     endCall,
     resetSession,
     notifyBarge,
+    cancelBarge,
     notifyPlaybackComplete,
   };
 };
