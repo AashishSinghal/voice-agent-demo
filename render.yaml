@@ -1,0 +1,36 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# New > Blueprint > pick this repo. Render reads this file, so the only manual
+# step is pasting the two secrets below.
+#
+# The free plan spins down after 15 minutes idle and takes 30-50s to wake. Put
+# an UptimeRobot monitor on /health every 5 minutes: a service running for a
+# full 31-day month uses 744 of the 750 free hours, so one always-on service
+# fits — but only one.
+
+services:
+  - type: web
+    name: voice-agent
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    envVars:
+      # Paste after the first deploy. sync:false keeps them out of git.
+      - key: GROQ_API_KEY
+        sync: false
+      # Your Vercel URL, e.g. https://voice-agent.vercel.app — this is the CORS
+      # origin, so the browser cannot reach the socket until it is right.
+      - key: CLIENT_URL
+        sync: false
+
+      - key: LLM_PROVIDER
+        value: groq
+      # Groq dropped Llama from the free tier in 2026.
+      # Current list: https://console.groq.com/docs/models
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+      - key: TTS_PROVIDER
+        value: piper

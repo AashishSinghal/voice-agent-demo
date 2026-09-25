@@ -213,8 +213,13 @@ backchannel classification, and the Whisper silence-artefact filter.
 
 ## Deployment
 
-See [DEPLOYMENT.md](./DEPLOYMENT.md) — a $0/month setup on Render + Vercel +
-Groq, including the free-tier cold-start trap and how to protect the quota.
+$0/month on Render + Vercel + Groq. The repo carries the config —
+[`render.yaml`](./render.yaml), [`backend/Dockerfile`](./backend/Dockerfile) and
+[`frontend/vercel.json`](./frontend/vercel.json) — so deploying is mostly
+clicking.
+
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for the steps, the free-tier cold-start
+trap, and how to stop one visitor exhausting the daily quota.
 
 ---
 

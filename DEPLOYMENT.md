@@ -60,16 +60,58 @@ Without these, one bored visitor can exhaust the day's budget.
 
 ## Deployment steps
 
-1. **Dockerfile** for the backend — Node 20 slim, plus `ffmpeg` and the Piper
-   binary. Fetch the voice model during the build with
-   `npm run fetch-voice` rather than committing it. Build for `linux/amd64`.
-2. **Render** → New Web Service → point at the repo → Docker → free plan.
-   Environment: `LLM_PROVIDER=groq`, `GROQ_API_KEY`, `GROQ_MODEL`,
-   `CLIENT_URL=https://<your-vercel-domain>`, `PIPER_*`.
-3. **Vercel** → import the repo → root `frontend/` → set
-   `VITE_SERVER_URL=https://<your-render-domain>`.
-4. **UptimeRobot** → HTTP monitor on `https://<render>/health`, 5-minute interval.
-5. **Langfuse + Sentry** → create free projects, add the keys as env vars.
+The repo carries the config, so this is mostly clicking.
+
+### 1. Backend → Render
+
+1. **New → Blueprint**, pick this repo. Render reads [`render.yaml`](./render.yaml)
+   and builds [`backend/Dockerfile`](./backend/Dockerfile).
+2. When it asks for the two secrets:
+   - `GROQ_API_KEY` — from https://console.groq.com/keys
+   - `CLIENT_URL` — leave blank for now, you do not have the Vercel URL yet.
+3. Wait for the first build. It installs ffmpeg and Piper and downloads the
+   voice model, so expect a few minutes.
+4. Check it came up: `curl https://<your-app>.onrender.com/health` — you want
+   `"groqKey": "configured"`.
+
+### 2. Frontend → Vercel
+
+1. **Add New → Project**, pick this repo, set **Root Directory** to `frontend`.
+   [`frontend/vercel.json`](./frontend/vercel.json) supplies the rest.
+2. Environment variable: `VITE_SERVER_URL=https://<your-app>.onrender.com`
+3. Deploy.
+
+### 3. Close the loop
+
+Set `CLIENT_URL` on Render to the Vercel URL and redeploy. This is the CORS
+origin — until it matches, the browser connects to nothing and the page sits
+there looking broken with no error worth reading.
+
+### 4. Keep it awake
+
+**UptimeRobot → HTTP monitor → `https://<your-app>.onrender.com/health`, every
+5 minutes.** Without this the first visitor waits 30-50 seconds for a cold
+start, which is worse than no demo.
+
+### 5. Optional: monitoring
+
+Langfuse Cloud Hobby for LLM tracing, Sentry for errors. Both free, both just
+environment variables.
+
+## Verified and unverified
+
+`npm ci --omit=dev` installs cleanly from the committed lockfile, `npm run build`
+produces the `dist/server.js` the image runs, and the fetch script pulls the
+voice model. **The image itself has not been built** — Docker was not running
+here. Before trusting a deploy, run:
+
+```bash
+cd backend && docker build --platform linux/amd64 -t voice-agent .
+docker run --rm -p 3000:3000 -e GROQ_API_KEY=... voice-agent
+```
+
+The `--platform` flag matters: an arm64 image built on an Apple laptop will not
+start on Render.
 
 ## If 512 MB turns out to be tight
 
@@ -77,7 +119,8 @@ Piper, ffmpeg and Node together are close to the limit. If it OOMs, swap TTS to
 **Groq's Orpheus** models (they replaced `playai-tts` in 2026) — that removes the
 Piper binary and the model file from the image entirely, at the cost of spending
 your Groq request budget on speech as well as text. The TTS call is isolated in
-`piperService.ts`, so it is a single-file change.
+`ttsService.ts` behind a `TTS_PROVIDER` switch, so it is one new branch in one
+file plus an environment variable — no change to the pipeline around it.
 
 ## Honest limitations to mention in an interview
 

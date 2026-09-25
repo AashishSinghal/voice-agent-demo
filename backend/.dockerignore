@@ -1,0 +1,9 @@
+node_modules
+dist
+models
+uploads
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store

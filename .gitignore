@@ -4,9 +4,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
+
+# Lockfiles are committed. This is an application, not a library: reproducible
+# installs are the point, and `npm ci` (used by the Docker build) requires one.
 
 # Environment variables
 .env
