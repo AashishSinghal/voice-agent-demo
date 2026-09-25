@@ -82,9 +82,9 @@ const Entry = ({ entry }: { entry: ChangeEntry }) => (
 const Changelog = ({ open, onClose }: ChangelogProps) => (
   <aside
     className={[
-      'fixed left-0 top-0 z-20 h-full w-[26rem] max-w-full border-r border-white/10 bg-zinc-950/95 backdrop-blur',
+      'fixed right-0 top-0 z-20 h-full w-[26rem] max-w-full border-l border-white/10 bg-zinc-950/95 backdrop-blur',
       'transition-transform duration-300 ease-out',
-      open ? 'translate-x-0' : '-translate-x-full',
+      open ? 'translate-x-0' : 'translate-x-full',
     ].join(' ')}
     aria-hidden={!open}
   >

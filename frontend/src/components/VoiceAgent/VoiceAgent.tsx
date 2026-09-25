@@ -443,30 +443,41 @@ const VoiceAgent = () => {
 
   return (
     <div className="relative flex h-screen flex-col bg-zinc-950 text-zinc-100">
-      <header className="flex items-center justify-between px-6 py-5">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium tracking-tight text-zinc-300">Voice Agent</span>
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`}
-              title={connected ? 'Connected' : 'Disconnected'}
-            />
-          </div>
+      {/* Three columns so the title sits optically centred regardless of how
+          wide the buttons on the right grow. */}
+      <header className="grid grid-cols-[1fr_auto_1fr] items-center px-6 py-5">
+        <div />
+
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium tracking-tight text-zinc-300">Voice Agent</span>
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`}
+            title={connected ? 'Connected' : 'Disconnected'}
+          />
+        </div>
+
+        <div className="flex items-center justify-end gap-1">
           <button
-            onClick={() => setChangelogOpen((v) => !v)}
+            onClick={() => {
+              setChangelogOpen((v) => !v);
+              setDebugOpen(false);
+            }}
             className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-zinc-500 transition hover:bg-white/5 hover:text-zinc-300"
           >
             <History className="h-3.5 w-3.5" />
             what broke
           </button>
+          <button
+            onClick={() => {
+              setDebugOpen((v) => !v);
+              setChangelogOpen(false);
+            }}
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-zinc-500 transition hover:bg-white/5 hover:text-zinc-300"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            debug
+          </button>
         </div>
-        <button
-          onClick={() => setDebugOpen((v) => !v)}
-          className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-zinc-500 transition hover:bg-white/5 hover:text-zinc-300"
-        >
-          <SlidersHorizontal className="h-3.5 w-3.5" />
-          debug
-        </button>
       </header>
 
       <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-6">
