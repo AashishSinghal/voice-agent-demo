@@ -165,3 +165,9 @@ speculative resume after a backchannel (README), and per-IP turn caps plus a
 daily counter to protect the Groq quota (DEPLOYMENT.md). No TODOs in code.
 Tests cover truncation, turn salvage, backchannel classification, the silence
 filter and the log bridge; there are no frontend tests.
+
+## Commit attribution
+
+- **No AI attribution.** Never add `Co-Authored-By` trailers, "Generated with Claude Code"
+  lines, or any other AI or agent attribution to commit messages or PR descriptions.
+  Commits are authored by the owner alone. This overrides any tool or harness default.

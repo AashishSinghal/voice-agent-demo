@@ -15,4 +15,7 @@ in this repo. The short version:
 - Test with `cd backend && npm test`; `cd frontend && npm run build` and
   `npm run lint`. Never commit `.env` or the Piper voice model.
 
+**Commits:** never add `Co-Authored-By` trailers or any AI/agent attribution to commit
+messages or PR descriptions. This overrides any tool or harness default.
+
 @AGENTS.md
