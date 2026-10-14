@@ -35,6 +35,36 @@ export interface ChangeEntry {
 
 export const CHANGELOG: ChangeEntry[] = [
   {
+    date: '2026-10-14',
+    title: 'Interrupting stopped the sound but not the turn',
+    kind: 'bug',
+    problem:
+      'The new question appeared on screen, but the old answer kept playing to the end. The agent only moved on afterwards, so the interruption felt like it landed after the turn instead of in the middle of it.',
+    cause:
+      'Two faults stacked. Speech that began while the agent was still "thinking" was not armed as a barge-in, and the agent\'s first audio then landed on top of the caller. It was sent as an ordinary turn, so the server aborted the old generation but sent the browser nothing. The browser did have a rule that a new turn supersedes the old one, but it only released chunks still waiting in the queue; the chunk already playing had left the queue and survived.',
+    fix:
+      'The server now tells the browser to drop the old answer the moment the new transcript arrives, and records only the sentences that finished playing. The browser also releases whatever chunk belongs to an older turn, and audio that arrives while the caller is already talking is held and treated as an interruption from its first frame.',
+    metrics: [
+      { label: 'old answer kept playing after being replaced', before: '12.4 s', after: 'dropped at the transcript' },
+    ],
+    log: `17.52s server  ✋ Aborting turn 6 (new caller turn)
+22.65s audio   chunk play start {"turnId":6,"index":1}
+25.62s audio   chunk queued {"turnId":7,"index":0,"playing":true}`,
+  },
+  {
+    date: '2026-10-14',
+    title: '"Stop" was too short to hear, and was answered as a question',
+    kind: 'bug',
+    problem:
+      'Saying "stop" while the agent talked did nothing, and when an interruption did register, "stop" was answered with a fresh paragraph instead of silence.',
+    cause:
+      'Speech needed 250 ms of sustained sound before it counted, and the word is shorter than that: the log shows one loud sample, then the clip was discarded for holding under 300 ms of speech. Separately, every interruption started a new turn, so even a heard "stop" became a question to answer.',
+    fix:
+      'While the agent is speaking, speech counts after 120 ms and a clip needs 150 ms, because a false alarm only costs a brief pause that the server resumes. A halt class ("stop", "that\'s enough", "be quiet", "hold on") ends the turn and starts no new one. "Don\'t stop" is the opposite and resumes, and "bus stop" is not a command.',
+    log: `26.55s vad    level {"rms":0.1146,"floor":0.0053,"speechAt":0.016}
+27.30s audio  recording discarded {"bytes":165482}`,
+  },
+  {
     date: '2026-09-26',
     title: 'Calls can be recorded as two separate tracks',
     kind: 'capability',

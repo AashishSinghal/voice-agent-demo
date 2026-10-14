@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { diag } from '../lib/diagnostics';
+import { shouldReleaseCurrent } from '../lib/interruptionRules';
 
 interface QueuedChunk {
   turnId: number;
@@ -219,7 +220,7 @@ export const useAudioPlayback = ({
   }, [releaseCurrent]);
 
   const enqueue = useCallback(
-    (chunk: QueuedChunk) => {
+    (chunk: QueuedChunk, options: { startPaused?: boolean } = {}) => {
       diag.log('audio', 'chunk queued', {
         turnId: chunk.turnId,
         index: chunk.index,
@@ -241,10 +242,19 @@ export const useAudioPlayback = ({
         const stale = queueRef.current.length;
         queueRef.current = queueRef.current.filter((q) => q.turnId === chunk.turnId);
 
-        if (pausedRef.current || stale > queueRef.current.length) {
+        const dropped = stale - queueRef.current.length;
+        if (
+          shouldReleaseCurrent({
+            paused: pausedRef.current,
+            droppedQueued: dropped,
+            playingTurn: activeTurnRef.current,
+            incomingTurn: chunk.turnId,
+          })
+        ) {
           diag.log('audio', 'superseded by new turn', {
             turnId: chunk.turnId,
-            droppedChunks: stale - queueRef.current.length,
+            droppedChunks: dropped,
+            playingTurn: activeTurnRef.current,
             wasPaused: pausedRef.current,
           });
           releaseCurrent();
@@ -254,6 +264,13 @@ export const useAudioPlayback = ({
           activeTurnRef.current = null;
         }
         chunksPlayedRef.current = 0;
+      }
+
+      // Applied after the new-turn handling above, which un-pauses: a chunk
+      // that arrives into live speech must stay held, not start playing.
+      if (options.startPaused) {
+        pausedRef.current = true;
+        setIsPlaying(false);
       }
 
       queueRef.current.push(chunk);

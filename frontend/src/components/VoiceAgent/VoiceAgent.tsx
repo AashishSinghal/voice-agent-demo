@@ -14,6 +14,7 @@ import Attribution from './Attribution';
 import Changelog from '../Changelog';
 import { toast } from 'sonner';
 import { diag } from '../../lib/diagnostics';
+import { shouldBargeOnArrival } from '../../lib/interruptionRules';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
 
@@ -71,6 +72,21 @@ const MIN_SPOKEN_MS = 300;
  */
 const ENDPOINT_MS = 900;
 const ENDPOINT_OVER_SPEECH_MS = 450;
+
+/**
+ * Interrupting needs to be quicker than starting a turn.
+ *
+ * A normal turn waits for 250ms of sustained sound before it believes someone
+ * is talking, which keeps coughs and door slams out. But "stop" is a quarter of
+ * a second long, so under that rule it never registered at all: the level
+ * showed one loud sample and nothing was detected. While the agent is speaking,
+ * a shorter onset is safe because the worst outcome of a false alarm is a brief
+ * pause that the server resumes, not a wrong answer.
+ */
+const BARGE_SPEECH_MS = 120;
+/** The same reasoning for how much audible speech an interruption must hold. */
+const BARGE_MIN_SPOKEN_MS = 150;
+const SPEECH_ONSET_MS = 250;
 
 const CAPTION: Record<CallState, string> = {
   idle: 'Tap to start talking',
@@ -151,6 +167,8 @@ const VoiceAgent = () => {
   });
 
   const notifyCompleteRef = useRef<(turnId: number) => void>(() => {});
+  /** Set once beginBarge exists; the socket callbacks below are created first. */
+  const beginBargeRef = useRef<() => void>(() => {});
 
   const playback = useAudioPlayback({
     onTurnPlayed: (turnId) => notifyCompleteRef.current(turnId),
@@ -169,7 +187,19 @@ const VoiceAgent = () => {
     notifyPlaybackProgress,
     notifyPlaybackComplete,
   } = useSocketConnection(SERVER_URL, {
-    onAudioChunk: (chunk) => playback.enqueue(chunk),
+    onAudioChunk: (chunk) => {
+      // The agent's first audio can land while the caller is already mid
+      // sentence: in the gap before speech is confirmed, or while the state
+      // still reads "thinking" and barge-in is not armed. Hold it and treat
+      // it as an interruption from the start rather than talk over them.
+      const barge = shouldBargeOnArrival({
+        callerSpeaking: sawSpeechRef.current,
+        alreadyBarging: bargeRef.current,
+        callActive: callActiveRef.current,
+      });
+      playback.enqueue(chunk, { startPaused: barge });
+      if (barge) beginBargeRef.current();
+    },
     onTurnComplete: (turnId) => playback.markTurnComplete(turnId),
     onResumePlayback: () => {
       bargeRef.current = false;
@@ -229,6 +259,35 @@ const VoiceAgent = () => {
   }, [isCallActive, stream, recorder.isRecording, beginRecording, recorder]);
 
   /**
+   * The caller is talking over the agent: pause playback and tell the server.
+   *
+   * Shared by the two ways this can start, speech being detected while the
+   * agent is speaking, and the agent's audio arriving while the caller is
+   * already speaking.
+   */
+  const beginBarge = useCallback(() => {
+    // Clock starts the instant we hear the caller over the agent: this is what
+    // "how fast does it react to an interruption" actually means.
+    startTimeline('interruption');
+    markTimeline('speech detected');
+
+    const played = playback.chunksPlayed();
+    spokenAtBargeRef.current = played;
+    bargeRef.current = true;
+
+    playback.pause();
+    markTimeline('playback paused');
+    trace('over-speech', `paused after ${played} chunk(s)`);
+
+    // The real turn id matters: the server ignores a barge reported against a
+    // turn it does not recognise, and then never enters its paused state.
+    notifyBarge(playback.latestTurn() ?? 0, played);
+  }, [playback, notifyBarge, trace, startTimeline, markTimeline]);
+  useEffect(() => {
+    beginBargeRef.current = beginBarge;
+  }, [beginBarge]);
+
+  /**
    * Caller started speaking over the agent.
    *
    * Playback is paused rather than dropped, and nothing is cancelled yet — this
@@ -244,24 +303,8 @@ const VoiceAgent = () => {
     trace('speech start', `state=${stateRef.current}`);
 
     if (stateRef.current !== 'speaking') return;
-
-    // Clock starts the instant we hear the caller over the agent — this is
-    // what "how fast does it react to an interruption" actually means.
-    startTimeline('interruption');
-    markTimeline('speech detected');
-
-    const played = playback.chunksPlayed();
-    spokenAtBargeRef.current = played;
-    bargeRef.current = true;
-
-    playback.pause();
-    markTimeline('playback paused');
-    trace('over-speech', `paused after ${played} chunk(s)`);
-
-    // The real turn id matters: the server ignores a barge reported against a
-    // turn it does not recognise, and then never enters its paused state.
-    notifyBarge(playback.latestTurn() ?? 0, played);
-  }, [playback, notifyBarge, trace, setUserSpeaking, startTimeline, markTimeline]);
+    beginBarge();
+  }, [beginBarge, trace, setUserSpeaking]);
 
   const handleSpeechEnd = useCallback(() => {
     if (!recorder.isRecording) {
@@ -277,16 +320,23 @@ const VoiceAgent = () => {
     // gives the span that was genuinely audible.
     const endpointWindow =
       stateRef.current === 'paused' ? ENDPOINT_OVER_SPEECH_MS : ENDPOINT_MS;
+    // The clock starts when speech is confirmed, which for an interruption is
+    // only BARGE_SPEECH_MS in; add it back so a short word is not undercounted.
     const spokenMs = Math.max(
       0,
-      Math.round(Date.now() - endpointWindow - speechStartedAtRef.current)
+      Math.round(
+        Date.now() -
+          endpointWindow -
+          speechStartedAtRef.current +
+          (bargeRef.current ? BARGE_SPEECH_MS : 0)
+      )
     );
     spokenMsRef.current = spokenMs;
 
     sawSpeechRef.current = false;
     setUserSpeaking(false);
 
-    if (spokenMs < MIN_SPOKEN_MS) {
+    if (spokenMs < (bargeRef.current ? BARGE_MIN_SPOKEN_MS : MIN_SPOKEN_MS)) {
       // Too brief to be speech — a cough, a door, a burst of noise. Sending it
       // invites a hallucinated transcript, so recycle instead.
       trace('discarded utterance', `only ${spokenMs}ms audible`);
@@ -313,7 +363,9 @@ const VoiceAgent = () => {
 
     pendingSendRef.current = {
       duringPlayback: bargeRef.current,
-      spokenChunks: spokenAtBargeRef.current,
+      // For a normal turn this is how much of the previous answer finished
+      // playing, so the server records only what was heard if it replaces it.
+      spokenChunks: bargeRef.current ? spokenAtBargeRef.current : playback.chunksPlayed(),
       trimStartMs,
       spokenMs,
       // What the server will actually send for transcription, which is what
@@ -337,7 +389,7 @@ const VoiceAgent = () => {
       onSpeechStart: handleSpeechStart,
       onSpeechEnd: handleSpeechEnd,
       silenceDuration: state === 'paused' ? ENDPOINT_OVER_SPEECH_MS : ENDPOINT_MS,
-      speechDuration: 250,
+      speechDuration: state === 'speaking' ? BARGE_SPEECH_MS : SPEECH_ONSET_MS,
       speechFactor: SPEECH_FACTOR,
       silenceFactor: SILENCE_FACTOR,
     }
