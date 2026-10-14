@@ -9,6 +9,20 @@ import {
   type LogLine,
 } from './services/logBridge.js';
 import { explainGroqTtsFailure } from './services/ttsService.js';
+import {
+  validateAudioInput,
+  validateBarge,
+  validatePlayback,
+  plausibleClipMs,
+} from './services/validate.js';
+import {
+  Limiter,
+  DEFAULT_LIMITS,
+  clientIp,
+  limitsFromEnv,
+  tokenMatches,
+  trustProxyFromEnv,
+} from './services/limits.js';
 import Groq from 'groq-sdk';
 import * as cost from './services/cost.js';
 import { parseCall } from './eval/parseDiagnostics.js';
@@ -177,6 +191,103 @@ console.log('\n--- mirrored logs are per-session and scrubbed ---');
   runInSession('A', () => console.log('after unsubscribe'));
   check('session unsubscribe works', seenA.length, 4);
   offB();
+}
+
+console.log('\n--- socket payload validation ---');
+{
+  const clip = Buffer.alloc(40_000); // plausibly ~10s of opus
+  const good = validateAudioInput({ audio: clip, trimStartMs: 700, spokenMs: 1200, clipMs: 5000, duringPlayback: true, spokenChunks: 2 });
+  check('valid audio accepted', good.ok, true);
+  if (good.ok) {
+    check('numbers pass through', [good.value.trimStartMs, good.value.spokenMs, good.value.clipMs, good.value.spokenChunks], [700, 1200, 5000, 2]);
+    check('ArrayBuffer is also accepted', validateAudioInput({ audio: new ArrayBuffer(100) }).ok, true);
+  }
+
+  for (const [label, payload] of [
+    ['null payload', null],
+    ['array payload', []],
+    ['string payload', 'audio'],
+    ['no audio', {}],
+    ['audio as string', { audio: 'AAAA' }],
+    ['audio as Uint8Array', { audio: new Uint8Array(10) }],
+    ['audio as number array', { audio: [1, 2, 3] }],
+    ['empty audio', { audio: Buffer.alloc(0) }],
+    ['NaN trimStartMs', { audio: clip, trimStartMs: NaN }],
+    ['Infinity clipMs', { audio: clip, clipMs: Infinity }],
+    ['string spokenMs', { audio: clip, spokenMs: '500' }],
+    ['non-boolean duringPlayback', { audio: clip, duringPlayback: 'yes' }],
+  ] as const) {
+    check(`rejects ${label}`, validateAudioInput(payload).ok, false);
+  }
+  check('rejects audio over the byte cap', validateAudioInput({ audio: Buffer.alloc(2000) }, 1000).ok, false);
+
+  const wild = validateAudioInput({ audio: clip, trimStartMs: 9e9, clipMs: 9e9, spokenMs: -50, spokenChunks: 99999 });
+  check('wild values are clamped, not rejected', wild.ok, true);
+  if (wild.ok) {
+    check('trimStartMs clamped to 30s', wild.value.trimStartMs, 30_000);
+    check('clipMs bounded by byte size', wild.value.clipMs, plausibleClipMs(clip.length));
+    check('negative spokenMs clamped to 0', wild.value.spokenMs, 0);
+    check('spokenChunks clamped', wild.value.spokenChunks, 1000);
+  }
+  const spokenOverClip = validateAudioInput({ audio: clip, clipMs: 2000, spokenMs: 9000 });
+  check('spokenMs cannot exceed the reported clip', spokenOverClip.ok && spokenOverClip.value.spokenMs, 2000);
+
+  check('barge accepted', validateBarge({ turnId: 3, chunksPlayed: 2 }), { ok: true, value: { turnId: 3, chunksPlayed: 2 } });
+  check('barge clamps chunksPlayed', validateBarge({ turnId: 3, chunksPlayed: -4 }).ok, true);
+  for (const bad of [undefined, null, {}, { turnId: '3' }, { turnId: 1.5 }, { turnId: -1 }, { turnId: NaN }, { turnId: 3, chunksPlayed: 'x' }]) {
+    check(`barge rejects ${JSON.stringify(bad)}`, validateBarge(bad).ok, false);
+  }
+  check('playback accepted', validatePlayback({ turnId: 7 }), { ok: true, value: { turnId: 7 } });
+  check('playback rejects bad turnId', validatePlayback({ turnId: {} }).ok, false);
+}
+
+console.log('\n--- abuse limits ---');
+{
+  let now = Date.UTC(2026, 0, 1, 12, 0, 0);
+  const cfg = { maxSocketsPerIp: 2, maxConnectsPerMinPerIp: 4, maxTurnsPerMinPerIp: 3, maxTurnsPerDay: 5 };
+  const lim = new Limiter(cfg, () => now);
+
+  const r1 = lim.open('1.1.1.1');
+  lim.open('1.1.1.1');
+  check('third concurrent socket refused', lim.checkConnect('1.1.1.1').allowed, false);
+  check('another IP unaffected', lim.checkConnect('2.2.2.2').allowed, true);
+  r1();
+  r1(); // a duplicate release must not free a second slot
+  check('slot freed after disconnect', lim.checkConnect('1.1.1.1').allowed, true);
+  lim.open('1.1.1.1');
+  check('double release did not over-free', lim.checkConnect('1.1.1.1').allowed, false);
+
+  const lim2 = new Limiter(cfg, () => now);
+  for (let i = 0; i < 4; i++) lim2.open('3.3.3.3')();
+  check('connection rate limited', lim2.checkConnect('3.3.3.3').allowed, false);
+  now += 61_000;
+  check('connection window slides', lim2.checkConnect('3.3.3.3').allowed, true);
+
+  const t = new Limiter(cfg, () => now);
+  check('turns 1-3 allowed', [t.tryTurn('a').allowed, t.tryTurn('a').allowed, t.tryTurn('a').allowed], [true, true, true]);
+  const refused = t.tryTurn('a');
+  check('fourth turn in a minute refused', !refused.allowed && refused.scope, 'ip-turns');
+  check('another IP still allowed', t.tryTurn('b').allowed, true);
+  now += 61_000;
+  check('per-minute window slides', t.tryTurn('a').allowed, true);
+  check('turns so far today', t.turnsToday(), 5);
+  const daily = t.tryTurn('c');
+  check('daily cap refuses with a message', !daily.allowed && daily.scope === 'daily' && daily.message.length > 20, true);
+  now += 13 * 3600_000; // past midnight UTC
+  check('daily counter resets at UTC midnight', t.tryTurn('c').allowed, true);
+  check('0 disables a limit', new Limiter({ ...cfg, maxTurnsPerDay: 0, maxTurnsPerMinPerIp: 0 }, () => now).tryTurn('z').allowed, true);
+
+  const env = limitsFromEnv({ MAX_TURNS_PER_DAY: '12', MAX_SOCKETS_PER_IP: 'junk' } as NodeJS.ProcessEnv);
+  check('limits read from env', [env.maxTurnsPerDay, env.maxSocketsPerIp], [12, DEFAULT_LIMITS.maxSocketsPerIp]);
+
+  check('direct address when no proxy trusted', clientIp('::ffff:9.9.9.9', '6.6.6.6', 0), '9.9.9.9');
+  check('spoofed XFF ignored without trust', clientIp('9.9.9.9', '6.6.6.6, 7.7.7.7', 0), '9.9.9.9');
+  check('one trusted proxy takes the last hop', clientIp('10.0.0.1', '6.6.6.6, 7.7.7.7', 1), '7.7.7.7');
+  check('two trusted proxies take the second from last', clientIp('10.0.0.1', '6.6.6.6, 7.7.7.7', 2), '6.6.6.6');
+  check('missing header falls back to socket', clientIp('9.9.9.9', undefined, 1), '9.9.9.9');
+  check('TRUST_PROXY=true is one hop', trustProxyFromEnv({ TRUST_PROXY: 'true' } as NodeJS.ProcessEnv), 1);
+  check('TRUST_PROXY unset is none', trustProxyFromEnv({} as NodeJS.ProcessEnv), 0);
+  check('token match', [tokenMatches('s3cret', 's3cret'), tokenMatches('s3cret', 'nope'), tokenMatches('s3cret', undefined)], [true, false, false]);
 }
 
 console.log('\n--- groq tts failures explain themselves ---');

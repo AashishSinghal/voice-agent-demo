@@ -5,6 +5,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import * as audioProcessor from './services/audioProcessor.js';
 import * as whisperService from './services/whisperService.js';
@@ -20,6 +21,18 @@ import {
   runInSession,
   describeError,
 } from './services/logBridge.js';
+import {
+  Limiter,
+  clientIp,
+  tokenMatches,
+  trustProxyFromEnv,
+} from './services/limits.js';
+import {
+  DEFAULT_MAX_AUDIO_BYTES,
+  validateAudioInput,
+  validateBarge,
+  validatePlayback,
+} from './services/validate.js';
 import type { CallState, CostReport, TurnMetrics } from './models/types.js';
 import * as cost from './services/cost.js';
 
@@ -33,6 +46,18 @@ function hasGroqKey(): boolean {
   const key = process.env.GROQ_API_KEY;
   return !!key && key !== 'your_groq_api_key_here';
 }
+
+const limiter = new Limiter();
+/** How many proxies sit in front of us (Render: 1). 0 means ignore X-Forwarded-For. */
+const TRUST_PROXY_HOPS = trustProxyFromEnv();
+/** Optional shared secret. Unset means the demo is open, as before. */
+const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || '').trim();
+const MAX_AUDIO_BYTES = Number(process.env.MAX_AUDIO_BYTES) > 0
+  ? Number(process.env.MAX_AUDIO_BYTES)
+  : DEFAULT_MAX_AUDIO_BYTES;
+/** Idle rate-limit state is dropped this often so the maps cannot grow forever. */
+const LIMITER_SWEEP_MS = 5 * 60_000;
+setInterval(() => limiter.sweep(), LIMITER_SWEEP_MS).unref();
 
 const app = express();
 const httpServer = createServer(app);
@@ -50,6 +75,7 @@ app.get('/health', (_, res) => {
     llmProvider: llm.activeProvider(),
     ttsProvider: tts.activeTtsProvider(),
     groqKey: hasGroqKey() ? 'configured' : 'missing (set GROQ_API_KEY)',
+    turnsToday: limiter.turnsToday(),
   });
 });
 
@@ -64,6 +90,33 @@ const io = new Server(httpServer, {
   maxHttpBufferSize: 10 * 1024 * 1024,
 });
 
+// Gate and rate-limit connections before a session exists, so a refused client
+// costs nothing. Rejections reach the browser as `connect_error` with the text.
+io.use((socket, next) => {
+  if (ACCESS_TOKEN && !tokenMatches(ACCESS_TOKEN, socket.handshake.auth?.token)) {
+    console.warn('⛔ connection refused: bad or missing access token');
+    return next(new Error('Access token required'));
+  }
+
+  const ip = clientIp(
+    socket.handshake.address,
+    socket.handshake.headers['x-forwarded-for'],
+    TRUST_PROXY_HOPS
+  );
+  const decision = limiter.checkConnect(ip);
+  if (!decision.allowed) {
+    console.warn(`⛔ connection refused for ${ip}: ${decision.scope}`);
+    return next(new Error(decision.message));
+  }
+
+  socket.data.ip = ip;
+  const release = limiter.open(ip);
+  socket.on('disconnect', release);
+  next();
+});
+
+/** Per-process scratch space for uploaded clips; never the working directory. */
+const UPLOAD_DIR = path.join(os.tmpdir(), 'voice-agent-uploads');
 const GREETING = process.env.AGENT_GREETING || "Hey, I'm listening. What can I help you with?";
 const STT_TIMEOUT_MS = 20_000;
 /**
@@ -142,6 +195,9 @@ io.on('connection', (socket: Socket) => {
   // Bind the raw emitter first: the log bridge uses it, and the wrapper below
   // logs — going through the wrapper would recurse.
   const rawEmit = socket.emit.bind(socket);
+  const ip = String(socket.data.ip ?? 'unknown');
+  /** Set on disconnect so work that outlives the socket can stand down. */
+  let closed = false;
   const trace = traceFactory(socket.id);
 
   // Everything this process prints, from here or from any service, goes to the
@@ -414,12 +470,12 @@ io.on('connection', (socket: Socket) => {
 
   /** Transcribe a recorded blob. Returns null if nothing usable was heard. */
   const transcribe = async (
-    audio: ArrayBuffer,
+    audio: Buffer,
     timeline?: Timeline,
     trimStartMs = 0
   ): Promise<{ text: string; ms: number } | null> => {
     const tempPath = path.join(
-      'uploads',
+      UPLOAD_DIR,
       `input_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.webm`
     );
     // May be the input itself when no trim is needed, so only clean up a
@@ -428,8 +484,8 @@ io.on('connection', (socket: Socket) => {
     const startedAt = Date.now();
 
     try {
-      await fs.promises.mkdir('uploads', { recursive: true });
-      await fs.promises.writeFile(tempPath, Buffer.from(audio));
+      await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
+      await fs.promises.writeFile(tempPath, audio);
       preparedPath = await audioProcessor.prepareForTranscription(tempPath, trimStartMs);
       timeline?.mark('audio prepared');
 
@@ -532,44 +588,49 @@ io.on('connection', (socket: Socket) => {
    * and is recording. Nothing is cancelled yet — it may only be a backchannel,
    * and stopping for every "mhm" makes the agent unusable.
    */
-  socket.on('barge:detected', (data: { turnId: number; chunksPlayed: number }) => {
+  socket.on('barge:detected', (raw: unknown) => {
+    const parsed = validateBarge(raw);
+    if (!parsed.ok) {
+      note('dropped barge:detected', { reason: parsed.reason });
+      return;
+    }
+    const data = parsed.value;
+
     // Accept the barge whenever a turn is in flight. Matching the reported id
     // exactly was too strict: while playback is paused the client's notion of
     // the current turn lags the server's, and a dropped barge left the call
     // without its paused state.
     const inFlight = session.controller !== null || session.pendingTurnId !== null;
     if (!inFlight) {
-      note('barge ignored', { turnId: data?.turnId, reason: 'nothing in flight' });
+      note('barge ignored', { turnId: data.turnId, reason: 'nothing in flight' });
       return;
     }
 
-    if (data?.turnId !== session.pendingTurnId && data?.turnId !== session.turnId) {
+    if (data.turnId !== session.pendingTurnId && data.turnId !== session.turnId) {
       note('barge turn mismatch', {
-        reported: data?.turnId,
+        reported: data.turnId,
         pending: session.pendingTurnId,
         current: session.turnId,
       });
     }
 
-    session.bargeChunksPlayed = data.chunksPlayed ?? 0;
+    session.bargeChunksPlayed = data.chunksPlayed;
     setState('paused');
-    console.log(`⏸  Barge on turn ${data?.turnId} after ${session.bargeChunksPlayed} chunks`);
+    console.log(`⏸  Barge on turn ${data.turnId} after ${session.bargeChunksPlayed} chunks`);
   });
 
   socket.on(
     'audio:input',
-    async (data: {
-      audio: ArrayBuffer;
-      duringPlayback?: boolean;
-      spokenChunks?: number;
-      trimStartMs?: number;
-      /** How long the caller was actually above the speech threshold. */
-      spokenMs?: number;
-      /** Length of the clip being sent, for transcription billing. */
-      clipMs?: number;
-    }) => {
+    async (raw: unknown) => {
       try {
-        if (!data?.audio) return;
+        // Every field comes from an uncontrolled browser. Invalid payloads are
+        // dropped, not answered: there is nothing useful to tell a bad client.
+        const parsed = validateAudioInput(raw, MAX_AUDIO_BYTES);
+        if (!parsed.ok) {
+          note('dropped audio:input', { reason: parsed.reason });
+          return;
+        }
+        const data = parsed.value;
 
         // The caller has hung up. Recorders can still flush buffered audio
         // after call:end, and acting on it makes the agent answer into a
@@ -581,18 +642,35 @@ io.on('connection', (socket: Socket) => {
 
         // Transcription is billed on clip length, and the response carries no
         // duration, so the client reports what it sent.
-        session.clipSeconds = (data.clipMs ?? 0) / 1000;
+        session.clipSeconds = data.clipMs / 1000;
+
+        // Spend a turn before any Groq call. Refusing here, rather than at
+        // connect time, keeps the quota guard on the thing that costs money.
+        const allowance = limiter.tryTurn(ip);
+        if (!allowance.allowed) {
+          note('turn refused', { scope: allowance.scope, retryAfterSec: allowance.retryAfterSec });
+          abortActiveTurn('turn refused by limiter');
+          socket.emit('limit:reached', {
+            scope: allowance.scope,
+            message: allowance.message,
+            retryAfterSec: allowance.retryAfterSec,
+          });
+          socket.emit('error', { message: allowance.message });
+          backToListening('turn refused by limiter');
+          return;
+        }
 
         if (!data.duringPlayback) {
           const timeline = new Timeline();
           setState('thinking');
 
-          const result = await transcribe(data.audio, timeline, data.trimStartMs ?? 0);
+          const result = await transcribe(data.audio, timeline, data.trimStartMs);
+          if (closed) return;
 
-          if (!result || looksHallucinated(result.text, data.spokenMs ?? 0)) {
+          if (!result || looksHallucinated(result.text, data.spokenMs)) {
             note('discarded transcript', {
               text: result?.text ?? null,
-              spokenMs: data.spokenMs ?? 0,
+              spokenMs: data.spokenMs,
               reason: result ? 'looks like a silence artefact' : 'nothing heard',
             });
             setState('listening');
@@ -617,14 +695,15 @@ io.on('connection', (socket: Socket) => {
 
         const timeline = new Timeline();
 
-        const result = await transcribe(data.audio, timeline, data.trimStartMs ?? 0);
+        const result = await transcribe(data.audio, timeline, data.trimStartMs);
+        if (closed) return;
 
         // Silence artefacts must never stop the agent mid-sentence.
-        const hallucinated = looksHallucinated(result?.text ?? '', data.spokenMs ?? 0);
+        const hallucinated = looksHallucinated(result?.text ?? '', data.spokenMs);
         if (hallucinated) {
           note('discarded over-speech', {
             text: result?.text ?? null,
-            spokenMs: data.spokenMs ?? 0,
+            spokenMs: data.spokenMs,
           });
         }
 
@@ -725,13 +804,19 @@ io.on('connection', (socket: Socket) => {
   });
 
   /** Every chunk for a turn has finished playing — the turn is now history. */
-  socket.on('playback:complete', (data: { turnId: number }) => {
-    if (data?.turnId !== session.pendingTurnId) {
+  socket.on('playback:complete', (raw: unknown) => {
+    const parsed = validatePlayback(raw);
+    if (!parsed.ok) {
+      note('dropped playback:complete', { reason: parsed.reason });
+      return;
+    }
+    const data = parsed.value;
+    if (data.turnId !== session.pendingTurnId) {
       // Stale or unknown turn — usually a turn that was interrupted after its
       // audio was queued. Dropping it silently used to leave the call wedged,
       // because nothing else would ever move it back to listening.
       note('stale playback:complete', {
-        received: data?.turnId,
+        received: data.turnId,
         pending: session.pendingTurnId,
       });
       if (session.controller === null && session.pendingTurnId === null) {
@@ -782,10 +867,17 @@ io.on('connection', (socket: Socket) => {
   }), 2000);
 
   socket.on('disconnect', () => {
-    unsubscribeLogs();
+    closed = true;
     clearInterval(watchdog);
     abortActiveTurn('client disconnected');
+    // Nothing should answer into a socket that is gone.
+    session.conversation.reset();
+    session.pendingText = null;
+    session.pendingTurnId = null;
+    session.state = 'ended';
     console.log(`🔌 Client disconnected: ${socket.id}`);
+    // Last, so the line above still reaches the session's log.
+    unsubscribeLogs();
   });
 });
 
