@@ -52,11 +52,19 @@ same streaming interface.
 The free LLM tier is **1,000 requests/day** and a public URL is a public URL.
 Before sharing it widely, add:
 
-- a per-IP turn cap (e.g. 20 turns/hour) — a few lines in the socket handler
-- a hard daily counter that degrades to a canned "demo limit reached" response
-- `maxHttpBufferSize` is already capped at 10 MB, which limits audio abuse
+The server enforces these itself (all tunable, see `backend/.env.example`):
 
-Without these, one bored visitor can exhaust the day's budget.
+- per IP: open sockets, connections per minute, and turns per minute
+- a global daily turn counter (`MAX_TURNS_PER_DAY`, default 150, about 750 Groq
+  requests) that refuses new turns with a visible message before the quota runs out
+- audio uploads capped at `MAX_AUDIO_BYTES` (8 MiB), every socket payload validated
+- an optional `ACCESS_TOKEN` gate on the socket handshake
+
+**On Render set `TRUST_PROXY=1`.** Behind its proxy every visitor otherwise shares
+the proxy's address and one person can lock everyone out; with it set, the
+client address is read from `X-Forwarded-For`. Leave it at 0 anywhere without a
+proxy, because the header can be forged. Limits live in memory, so a restart
+resets the daily counter.
 
 ## Deployment steps
 

@@ -225,13 +225,14 @@ history forever and it belongs to its publisher — so fetch it when you want it
 cd backend && npm run fetch-voice
 ```
 
-### Why `say` locally and Piper in deployment
+### Why `say` locally and hosted TTS in deployment
 
 The `piper-tts` macOS arm64 wheel (1.8.0) ships an espeak-ng data path pointing
 at its own CI build machine, so it cannot synthesise anything on a Mac — the
-native bridge ignores the data directory it is given. The Linux wheel used in
-the container is unaffected. Local development therefore uses macOS's built-in
-`say` (no setup, no 60 MB model download) and deployment uses Piper. It is one
+native bridge ignores the data directory it is given. The Linux wheel works,
+but Piper is too slow for the free instance (see above). Local development
+therefore uses macOS's built-in `say` (no setup, no 60 MB model download) and
+deployment uses Groq's hosted voice (`TTS_PROVIDER=groq`). It is one
 environment variable; the call site is identical.
 
 ---

@@ -44,7 +44,10 @@ backend/src/
   services/whisperService.ts   Groq Whisper STT
   services/audioProcessor.ts   trims to the speech onset; never transcodes
   services/timeline.ts         per-stage turn timings
-  services/logBridge.ts        mirrors console output to the client diagnostic log
+  services/logBridge.ts        mirrors console output to the client diagnostic log,
+                               scoped per session and scrubbed of secrets
+  services/validate.ts         validates and clamps every socket payload
+  services/limits.ts           per-IP and daily abuse limits, trust-proxy IP
   smoke.ts                     tests
 backend/scripts/               fetch-voice.sh (Piper model), check-memory.sh
 backend/Dockerfile             two-stage image; Piper only with INSTALL_PIPER=true
@@ -96,7 +99,10 @@ Names only; see `backend/.env.example` for defaults and comments. Never commit
 - Backend: `PORT`, `NODE_ENV`, `CLIENT_URL` (CORS origin), `LLM_PROVIDER`,
   `GROQ_API_KEY`, `GROQ_MODEL`, `OLLAMA_HOST`, `OLLAMA_MODEL`, `TTS_PROVIDER`,
   `SAY_VOICE`, `GROQ_TTS_MODEL`, `GROQ_TTS_VOICE`, `PIPER_MODEL`,
-  `PIPER_MODEL_PATH`, `PIPER_BIN`, `AGENT_PERSONA`, `AGENT_GREETING`.
+  `PIPER_MODEL_PATH`, `PIPER_BIN`, `AGENT_PERSONA`, `AGENT_GREETING`,
+  `STT_LANGUAGE`, `GROQ_STT_MODEL`, `TRUST_PROXY`, `MAX_SOCKETS_PER_IP`,
+  `MAX_CONNECTS_PER_MIN_PER_IP`, `MAX_TURNS_PER_MIN_PER_IP`, `MAX_TURNS_PER_DAY`,
+  `MAX_AUDIO_BYTES`, `ACCESS_TOKEN`.
 - Frontend: `VITE_SERVER_URL` (backend URL; defaults to `http://localhost:3000`).
 - `.env.example` sets `TTS_PROVIDER=say` for local Mac dev; code and deployment
   default to `groq`.
@@ -150,19 +156,17 @@ Names only; see `backend/.env.example` for defaults and comments. Never commit
   free hours for exactly one service.
 - **Build for amd64.** An arm64 image built on a Mac will not start on Render.
 - Every `console.*` line is bridged to the client diagnostic log
-  (`logBridge.ts`); a subscriber that logs must not recurse. In dev,
+  (`logBridge.ts`), but only to the session that printed it (AsyncLocalStorage;
+  socket handlers run via `runInSession`). Never log raw error objects or keys:
+  use `describeError`. A subscriber that logs must not recurse. In dev,
   `__diag.toText()` and `__botStore` are on `window`.
-- **Stale docs:** the README section "Why `say` locally and Piper in deployment"
-  and `backend/README.md` still say Piper is used in deployment. Deployment uses
-  `TTS_PROVIDER=groq`; `DEPLOYMENT.md` and `render.yaml` are current.
 
 ## Current state and next steps
 
 Deployed and working. Known limitations (README): single instance, in-memory
 per-socket conversation state, and reaction time floored by endpointing plus
 transcription. Ideas already written down in the repo, not implemented:
-speculative resume after a backchannel (README), and per-IP turn caps plus a
-daily counter to protect the Groq quota (DEPLOYMENT.md). No TODOs in code.
+speculative resume after a backchannel (README). No TODOs in code.
 Tests cover truncation, turn salvage, backchannel classification, the silence
 filter and the log bridge; there are no frontend tests.
 

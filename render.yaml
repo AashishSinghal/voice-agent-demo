@@ -40,3 +40,7 @@ services:
         value: canopylabs/orpheus-v1-english
       - key: GROQ_TTS_VOICE
         value: troy
+      # One proxy (Render's) sits in front, so read the client address from
+      # X-Forwarded-For for the per-IP limits. See DEPLOYMENT.md.
+      - key: TRUST_PROXY
+        value: "1"
