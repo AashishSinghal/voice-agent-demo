@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import Groq from 'groq-sdk';
 import { redactSecrets } from './logBridge.js';
@@ -8,8 +9,11 @@ import { redactSecrets } from './logBridge.js';
 /**
  * Text-to-speech, pluggable by provider.
  *
- *   TTS_PROVIDER=piper  — bundled Piper binary + ONNX voice. Used in Docker
- *                         and in deployment: no API, no quota, no key.
+ *   TTS_PROVIDER=groq   — hosted Orpheus. The deployed default: synthesis is
+ *                         a network call, so the 0.1 vCPU free instance copes.
+ *   TTS_PROVIDER=piper  — Piper binary + ONNX voice. Opt-in (Docker build arg
+ *                         INSTALL_PIPER=true): no API or quota, but it needs
+ *                         real CPU.
  *   TTS_PROVIDER=say    — macOS built-in `say`. Used for local development,
  *                         because the piper-tts macOS arm64 wheel (1.8.0)
  *                         ships a broken espeak-ng data path and cannot
@@ -101,7 +105,7 @@ export function explainGroqTtsFailure(error: unknown, model: string): Error {
 }
 
 function tempWavPath(): string {
-  return path.join('/tmp', `tts_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.wav`);
+  return path.join(os.tmpdir(), `tts_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.wav`);
 }
 
 /** Spawn a synthesiser, honouring `signal`, and resolve when it exits 0. */

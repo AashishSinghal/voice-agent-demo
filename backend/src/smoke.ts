@@ -23,6 +23,7 @@ import {
   tokenMatches,
   trustProxyFromEnv,
 } from './services/limits.js';
+import { confidenceFromSegments, sttLanguage } from './services/whisperService.js';
 import Groq from 'groq-sdk';
 import * as cost from './services/cost.js';
 import { parseCall } from './eval/parseDiagnostics.js';
@@ -240,6 +241,17 @@ console.log('\n--- socket payload validation ---');
   check('playback accepted', validatePlayback({ turnId: 7 }), { ok: true, value: { turnId: 7 } });
   check('playback rejects bad turnId', validatePlayback({ turnId: {} }).ok, false);
 }
+
+console.log('\n--- whisper confidence is measured ---');
+check('no segments -> null, not a made-up number', confidenceFromSegments([]), null);
+check('undefined segments -> null', confidenceFromSegments(undefined), null);
+check('logprob 0 and no silence -> 1', confidenceFromSegments([{ avg_logprob: 0, no_speech_prob: 0 }]), 1);
+check('likely-silence segment is penalised', confidenceFromSegments([{ avg_logprob: 0, no_speech_prob: 0.9 }]), 0.1);
+{
+  const mixed = confidenceFromSegments([{ avg_logprob: -0.1, no_speech_prob: 0.01 }, { avg_logprob: -1.5, no_speech_prob: 0.02 }]);
+  check('mixed segments land in (0,1)', mixed !== null && mixed > 0.3 && mixed < 0.8, true);
+}
+check('STT language defaults to en', sttLanguage(), 'en');
 
 console.log('\n--- abuse limits ---');
 {

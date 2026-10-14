@@ -44,23 +44,6 @@ export async function prepareForTranscription(
   });
 }
 
-export async function getAudioDuration(filePath: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, metadata) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(metadata.format.duration || 0);
-      }
-    });
-  });
-}
-
-export function extractPCM(wavBuffer: Buffer): Buffer {
-  // WAV header is typically 44 bytes
-  return wavBuffer.slice(44);
-}
-
 export async function cleanupAudioFile(filePath: string): Promise<void> {
   try {
     if (fs.existsSync(filePath)) {
