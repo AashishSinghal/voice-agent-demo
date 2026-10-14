@@ -69,6 +69,18 @@ generating. On barge-in the client pauses playback locally (~250ms) and sends
 `barge:detected`; after the utterance the server either emits
 `playback:resume` (backchannel) or `turn:interrupted`.
 
+## The brain (in progress, see PLAN.md)
+
+`brain/` is a Python reasoning service (FastAPI + LangGraph) selected with
+`LLM_PROVIDER=brain`. The gateway keeps everything latency-critical; the brain
+owns history, tools, the context budget and cost control. Contract:
+`docs/CONTRACT.md`. Two rules carry over from the gateway:
+
+- After an interruption the gateway must report what was heard
+  (`POST /v1/threads/{id}/heard`). The brain checkpoints its own history, so
+  without it the brain would keep the full generated reply.
+- Tests use `ScriptedChatModel`, never the network. `cd brain && uv run pytest`.
+
 ## Commands
 
 Backend (`cd backend`): `npm run dev` (nodemon + tsx, port 3000), `npm test`
