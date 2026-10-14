@@ -433,6 +433,12 @@ console.log('\n--- brain event stream ---');
   check('events survive arbitrary chunk splits', events.map((e) => e.text), ['Hel', 'lo']);
   check('keep-alive comments are ignored', events.length, 2);
   check('a malformed block does not kill the stream', new SseParser().push('data: {oops\n\ndata: {"type":"token","text":"x"}\n\n').length, 1);
+  check(
+    'approval requests are mapped to camelCase',
+    parseBrainEvent({ type: 'approval_required', call_id: 'c1', tool: 'delete_note', args: { note: 'x' }, prompt: 'Sure?' }),
+    { type: 'approval_required', callId: 'c1', tool: 'delete_note', args: { note: 'x' }, prompt: 'Sure?' }
+  );
+  check('done carries awaitingApproval', (parseBrainEvent({ type: 'done', text: 'q', awaiting_approval: true }) as any).awaitingApproval, true);
   check('unknown event types are ignored', parseBrainEvent({ type: 'future_thing' }), null);
   check(
     'usage is mapped to camelCase',

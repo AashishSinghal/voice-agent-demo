@@ -80,6 +80,10 @@ owns history, tools, the context budget and cost control. Contract:
   (`POST /v1/threads/{id}/heard`). The brain checkpoints its own history, so
   without it the brain would keep the full generated reply.
 - Tests use `ScriptedChatModel`, never the network. `cd brain && uv run pytest`.
+- Capabilities come from MCP servers in `brain/mcp.json` (`docs/MCP.md`). Risky
+  tools pause for a spoken yes; the answer is a set lookup, never a model call,
+  and the approval gate must stay free of side effects (LangGraph re-runs an
+  interrupted node on resume).
 
 ## Commands
 

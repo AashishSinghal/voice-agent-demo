@@ -42,6 +42,18 @@ class ToolResult(BaseModel):
     content: str
 
 
+class ApprovalRequired(BaseModel):
+    """The graph is paused on a risky tool call. The `prompt` has already been
+    streamed as tokens, so the gateway speaks it without knowing about this
+    event; the caller's next utterance answers it."""
+
+    type: Literal["approval_required"] = "approval_required"
+    call_id: str
+    tool: str
+    args: dict
+    prompt: str
+
+
 class Context(BaseModel):
     type: Literal["context"] = "context"
     report: dict
@@ -64,6 +76,7 @@ class Done(BaseModel):
     turn_usd: float
     steps: int
     degraded: bool = False
+    awaiting_approval: bool = False
 
 
 class Error(BaseModel):
@@ -72,6 +85,6 @@ class Error(BaseModel):
 
 
 Event = Annotated[
-    Token | ToolCall | ToolResult | Context | Usage | Done | Error,
+    Token | ToolCall | ToolResult | ApprovalRequired | Context | Usage | Done | Error,
     Field(discriminator="type"),
 ]

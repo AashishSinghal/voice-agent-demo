@@ -49,6 +49,9 @@ def turn(client: httpx.Client, url: str, session: str, text: str) -> None:
             elif kind == "tool_result":
                 print(f"{CYAN}  tool_result {e['name']} -> {e['content']}{RESET}")
                 print(f"{BOLD}agent:{RESET} ", end="", flush=True)
+            elif kind == "approval_required":
+                print(f"\n{YELLOW}  needs approval: {e['tool']} {json.dumps(e['args'])}{RESET}")
+                print(f"{DIM}  (answer yes or no; anything else cancels it){RESET}", end="")
             elif kind == "usage":
                 step = (
                     f" {YELLOW}(stepped down from {e['degraded_from']}){RESET}" if e["degraded_from"] else ""
@@ -60,6 +63,7 @@ def turn(client: httpx.Client, url: str, session: str, text: str) -> None:
             elif kind == "done":
                 ft = f"{first_token * 1000:.0f}ms" if first_token else "n/a"
                 flag = f" {YELLOW}DEGRADED{RESET}" if e["degraded"] else ""
+                flag += f" {YELLOW}AWAITING APPROVAL{RESET}" if e.get("awaiting_approval") else ""
                 print(
                     f"\n{GREEN}  done{RESET} steps={e['steps']} turn=${e['turn_usd']:.6f} "
                     f"first-token={ft} total={(time.monotonic() - started) * 1000:.0f}ms{flag}"

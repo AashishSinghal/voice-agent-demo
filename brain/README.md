@@ -14,6 +14,9 @@ is in [`../docs/CONTRACT.md`](../docs/CONTRACT.md); the roadmap is in
 | `app/cost.py` | Cost guard and degradation chain (Frontier -> Mid -> Local), step cap |
 | `app/llm.py` | Provider factory (`fake`, `groq`, `ollama`) and a scripted fake model |
 | `app/tools.py` | Tool registry; each tool carries a risk level |
+| `app/connectors.py` | Config-driven MCP connectors, with a per-server policy |
+| `app/mcp_client.py` | MCP client over stdio, written against the spec (no SDK) |
+| `app/approval.py` | Spoken yes/no for risky tools, a set lookup |
 | `app/stream.py` | Graph run -> contract events |
 | `app/main.py` | HTTP surface |
 
@@ -54,11 +57,18 @@ BRAIN_PROVIDER=groq uv run uvicorn app.main:create_app --factory --port 8000
 
 Then point the gateway at it: `LLM_PROVIDER=brain BRAIN_URL=http://localhost:8000`.
 
+## Connect tools
+
+The agent's abilities come from MCP servers listed in `brain/mcp.json`; see
+[`../docs/MCP.md`](../docs/MCP.md). Out of the box it has a Notes connector (save,
+search, read, delete). `uv run python scripts/check_connectors.py` shows what the
+model would see. Notion setup is in that document.
+
 ## Configuration
 
 `BRAIN_PROVIDER`, `BRAIN_DB` (SQLite checkpoint file), `BRAIN_TURN_BUDGET_USD`,
 `BRAIN_MAX_STEPS`, `BRAIN_CONTEXT_TOKENS`, `BRAIN_RESERVE_OUTPUT`,
-`BRAIN_FRONTIER_MODEL`, `BRAIN_MID_MODEL`, `BRAIN_LOCAL_MODEL`.
+`BRAIN_MCP_CONFIG`, `BRAIN_APPROVAL_TTL_S`, `BRAIN_FRONTIER_MODEL`, `BRAIN_MID_MODEL`, `BRAIN_LOCAL_MODEL`.
 
 ## Design notes
 

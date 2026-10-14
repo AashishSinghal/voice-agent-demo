@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "notes": {
+      "builtin": "notes",
+      "scopes": ["notes:read", "notes:write", "notes:delete"]
+    },
+    "notion": {
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": { "NOTION_TOKEN": "${NOTION_TOKEN}" },
+      "startupTimeoutSeconds": 60,
+      "policy": {
+        "allow": [
+          "API-post-search",
+          "API-retrieve-a-page",
+          "API-retrieve-page-markdown",
+          "API-get-block-children",
+          "API-query-data-source",
+          "API-post-page",
+          "API-patch-block-children"
+        ],
+        "safe": ["API-post-search", "API-query-data-source"]
+      }
+    }
+  }
+}

@@ -69,7 +69,11 @@ Done when: a spoken turn can be routed through the brain end to end, a thread
 resumes after a process restart, and a runaway loop is stopped by the guard in
 a test.
 
-### 2. Hands
+### 2. Hands (first slice built)
+Done: raw MCP server and client (stdio), config-driven connectors with per-server
+policy, the Notes connector, durable approvals. Notion connects over stdio.
+Next: Streamable HTTP + OAuth for hosted servers, then calendar and Gmail.
+
 - **#3 Raw MCP client and servers.** JSON-RPC 2.0 over stdio and HTTP, written
   against the spec. Capability scoping: each tool carries a scope, each session
   a token listing the scopes it may use. Connectors (notes, calendar, github)
