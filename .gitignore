@@ -95,3 +95,7 @@ __pycache__/
 .ruff_cache/
 brain/data/
 .claude/
+
+# Local connector config and secrets (see mcp.example.json)
+brain/mcp.json
+brain/.env
