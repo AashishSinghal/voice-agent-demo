@@ -23,9 +23,10 @@ export type BrainEvent =
   | { type: 'token'; text: string }
   | { type: 'tool_call'; id: string; name: string; args: Record<string, unknown> }
   | { type: 'tool_result'; id: string; name: string; content: string }
+  | { type: 'approval_required'; callId: string; tool: string; args: Record<string, unknown>; prompt: string }
   | { type: 'context'; report: Record<string, unknown> }
   | { type: 'usage'; usage: BrainUsage }
-  | { type: 'done'; text: string; turnUsd: number; steps: number; degraded: boolean }
+  | { type: 'done'; text: string; turnUsd: number; steps: number; degraded: boolean; awaitingApproval: boolean }
   | { type: 'error'; message: string };
 
 export function brainUrl(): string {
@@ -41,6 +42,14 @@ export function parseBrainEvent(raw: Record<string, any>): BrainEvent | null {
       return { type: 'tool_call', id: raw.id, name: raw.name, args: raw.args ?? {} };
     case 'tool_result':
       return { type: 'tool_result', id: raw.id, name: raw.name, content: String(raw.content ?? '') };
+    case 'approval_required':
+      return {
+        type: 'approval_required',
+        callId: raw.call_id,
+        tool: raw.tool,
+        args: raw.args ?? {},
+        prompt: String(raw.prompt ?? ''),
+      };
     case 'context':
       return { type: 'context', report: raw.report ?? {} };
     case 'usage':
@@ -62,6 +71,7 @@ export function parseBrainEvent(raw: Record<string, any>): BrainEvent | null {
         turnUsd: raw.turn_usd ?? 0,
         steps: raw.steps ?? 0,
         degraded: !!raw.degraded,
+        awaitingApproval: !!raw.awaiting_approval,
       };
     case 'error':
       return { type: 'error', message: String(raw.message ?? 'brain error') };
