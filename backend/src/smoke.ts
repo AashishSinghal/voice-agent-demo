@@ -26,6 +26,7 @@ import {
 import { confidenceFromSegments, sttLanguage } from './services/whisperService.js';
 import Groq from 'groq-sdk';
 import * as cost from './services/cost.js';
+import { resolveBargeCancel } from './services/bargeCancel.js';
 import { parseCall } from './eval/parseDiagnostics.js';
 
 let failures = 0;
@@ -410,6 +411,13 @@ check('payload-less trace lines ignored', parsed.events.some((e) => e.name.inclu
 
 // A silent stretch fires speech-end without a send; it must not invent an utterance.
 check('unpaired speech-end ignored', parsed.utterances.every((u) => u.bytes > 0), true);
+
+console.log('\n--- barge cancelled ---');
+check('paused with a turn in flight resumes speaking', resolveBargeCancel('paused', true), 'resume');
+check('paused after the turn finished returns to listening', resolveBargeCancel('paused', false), 'listen');
+for (const state of ['idle', 'listening', 'thinking', 'speaking', 'ended'] as const) {
+  check(`a stale cancel while ${state} is ignored`, resolveBargeCancel(state, true), 'ignore');
+}
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

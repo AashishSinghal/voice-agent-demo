@@ -15,6 +15,7 @@ import { SentenceChunker } from './services/sentenceChunker.js';
 import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
 import { Conversation } from './services/conversation.js';
 import { Timeline } from './services/timeline.js';
+import { resolveBargeCancel } from './services/bargeCancel.js';
 import {
   installLogBridge,
   subscribeToSessionLogs,
@@ -617,6 +618,29 @@ io.on('connection', (socket: Socket) => {
     session.bargeChunksPlayed = data.chunksPlayed;
     setState('paused');
     console.log(`⏸  Barge on turn ${data.turnId} after ${session.bargeChunksPlayed} chunks`);
+  });
+
+  /**
+   * The barge-in turned out to be nothing — a cough, a chair, a false trigger —
+   * so no audio will follow. The client has already resumed playback; the
+   * server must leave `paused` too, or it waits for the watchdog.
+   */
+  socket.on('barge:cancelled', (raw: unknown) => {
+    // The payload carries only a diagnostic reason, so there is nothing to
+    // trust: the decision comes from server state alone.
+    const reason =
+      raw && typeof raw === 'object' && typeof (raw as { reason?: unknown }).reason === 'string'
+        ? (raw as { reason: string }).reason.slice(0, 80)
+        : undefined;
+    const turnInFlight = session.controller !== null || session.pendingTurnId !== null;
+    const action = resolveBargeCancel(session.state, turnInFlight);
+    note('barge cancelled', { reason, action, from: session.state });
+
+    if (action === 'resume') {
+      setState('speaking');
+    } else if (action === 'listen') {
+      backToListening('barge cancelled with no turn in flight');
+    }
   });
 
   socket.on(
