@@ -17,8 +17,8 @@ for anything that would otherwise burn model calls in CI.
 ## Architecture
 
 ```
-gateway/   Node. Voice, sockets, VAD, interruptions, STT/TTS, sentence chunker.
-           (today still at backend/, moved after the hardening PR merges)
+backend/   Node. The gateway: voice, sockets, VAD, interruptions, STT/TTS,
+           sentence chunker. Keeps its name (see below).
 brain/     Python. FastAPI + LangGraph. Router, context assembler, memory,
            RAG, PII proxy, cost guard, MCP client.
 mcp/       Raw JSON-RPC 2.0 servers (no SDK): notes, calendar, github.
@@ -30,6 +30,10 @@ The gateway keeps everything latency-critical. It sends the brain a transcript
 and receives a stream of typed events; it never knows which model or graph runs
 behind it (`docs/CONTRACT.md`). The existing Node LLM path stays as a fallback
 (`LLM_PROVIDER=groq|ollama`), and the brain is a third provider (`brain`).
+
+`backend/` is not renamed to `gateway/`. The rename would move the live Render
+service's root directory, Dockerfile path, CI and every doc link, risking a
+working deployment for a purely cosmetic gain. In prose it is "the gateway".
 
 Decisions worth an ADR as we go: hybrid Node+Python over a rewrite; LangGraph
 over Temporal; raw JSON-RPC MCP over the SDK; heuristic token counting over a
