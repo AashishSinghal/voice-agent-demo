@@ -19,7 +19,7 @@ const Transcript = ({ messages }: TranscriptProps) => {
   if (messages.length === 0) return null;
 
   return (
-    <div className="mx-auto w-full max-w-xl space-y-3 overflow-y-auto px-6 pb-2">
+    <div className="scroll-dark mx-auto w-full max-w-xl space-y-3 overflow-y-auto px-6 pb-2">
       {messages.map((message) => {
         if (message.type === 'system') {
           return (

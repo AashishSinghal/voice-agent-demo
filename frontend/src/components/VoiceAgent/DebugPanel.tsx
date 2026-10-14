@@ -234,7 +234,7 @@ const DebugPanel = ({
         </button>
       </div>
 
-      <div className="space-y-6 overflow-y-auto px-5 py-4" style={{ height: 'calc(100% - 57px)' }}>
+      <div className="scroll-dark space-y-6 overflow-y-auto px-5 py-4" style={{ height: 'calc(100% - 57px)' }}>
         <section>
           <h3 className="mb-2 text-[11px] uppercase tracking-wider text-zinc-600">
             Diagnostics

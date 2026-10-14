@@ -65,7 +65,7 @@ const Entry = ({ entry }: { entry: ChangeEntry }) => (
     )}
 
     {entry.log && (
-      <pre className="mt-3 overflow-x-auto rounded bg-black/40 p-2.5 font-mono text-[10px] leading-relaxed text-zinc-500">
+      <pre className="scroll-dark mt-3 overflow-x-auto rounded bg-black/40 p-2.5 font-mono text-[10px] leading-relaxed text-zinc-500">
         {entry.log}
       </pre>
     )}
@@ -104,7 +104,7 @@ const Changelog = ({ open, onClose }: ChangelogProps) => (
       </button>
     </div>
 
-    <div className="space-y-7 overflow-y-auto px-5 py-5" style={{ height: 'calc(100% - 65px)' }}>
+    <div className="scroll-dark space-y-7 overflow-y-auto px-5 py-5" style={{ height: 'calc(100% - 65px)' }}>
       {CHANGELOG.map((entry) => (
         <Entry key={`${entry.date}-${entry.title}`} entry={entry} />
       ))}

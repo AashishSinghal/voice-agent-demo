@@ -121,3 +121,36 @@
     @apply bg-background text-foreground;
   }
 }
+
+/*
+ * Scrollbars for the dark panels.
+ *
+ * The browser draws light, chunky scrollbars unless told the surface is dark.
+ * `color-scheme: dark` fixes the native chrome (including the corner and
+ * overscroll); the thin translucent thumb matches the panels' white/10 borders.
+ * The ::-webkit rules cover Safari versions without scrollbar-color.
+ */
+@layer utilities {
+  .scroll-dark {
+    color-scheme: dark;
+    scrollbar-width: thin;
+    scrollbar-color: rgb(255 255 255 / 0.2) transparent;
+  }
+  .scroll-dark::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scroll-dark::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scroll-dark::-webkit-scrollbar-thumb {
+    background: rgb(255 255 255 / 0.18);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  .scroll-dark::-webkit-scrollbar-thumb:hover {
+    background: rgb(255 255 255 / 0.32);
+    background-clip: content-box;
+  }
+}
