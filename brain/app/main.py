@@ -53,6 +53,15 @@ def create_app(settings: Settings | None = None, fake_model: BaseChatModel | Non
             "sessionId": session_id,
             "messages": len(values.get("messages", [])),
             "sessionUsd": values.get("session_usd", 0.0),
+            "history": [
+                {
+                    "role": m.type,
+                    "content": m.content if isinstance(m.content, str) else str(m.content),
+                    "interrupted": bool(m.additional_kwargs.get("interrupted")),
+                    "unspoken": m.additional_kwargs.get("unspoken"),
+                }
+                for m in values.get("messages", [])
+            ],
         }
 
     @app.post("/v1/threads/{session_id}/heard")

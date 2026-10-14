@@ -99,3 +99,12 @@ def test_heard_appends_when_the_reply_never_reached_the_checkpoint(tmp_path):
         c.post("/v1/threads/p/heard", json={"spoken": "Partial", "unspoken": "rest"})
         msgs = asyncio.run(graph.aget_state(cfg)).values["messages"]
         assert [m.content for m in msgs] == ["first", "Hi from the brain", "second", "Partial"]
+
+
+def test_thread_history_exposes_interruption_state(tmp_path):
+    with TestClient(make(tmp_path)) as c:
+        c.post("/v1/turn", json={"session_id": "hx", "text": "tell me"})
+        c.post("/v1/threads/hx/heard", json={"spoken": "Hi", "unspoken": "from the brain"})
+        history = c.get("/v1/threads/hx").json()["history"]
+        assert [m["role"] for m in history] == ["human", "ai"]
+        assert history[1]["interrupted"] is True and history[1]["unspoken"] == "from the brain"

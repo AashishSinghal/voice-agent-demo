@@ -17,7 +17,24 @@ is in [`../docs/CONTRACT.md`](../docs/CONTRACT.md); the roadmap is in
 | `app/stream.py` | Graph run -> contract events |
 | `app/main.py` | HTTP surface |
 
-## Run
+## Run everything with one command
+
+From the repo root:
+
+```bash
+npm install && npm run setup     # once: mprocs, backend, frontend, brain deps
+npm run dev                      # brain + gateway + frontend in one terminal
+```
+
+`npm run dev` opens [mprocs](https://github.com/pvolok/mprocs): one pane per
+process. Up/down picks a process, `enter` focuses its logs, `ctrl+a` returns to
+the list, `r` restarts, `x` stops, `q` quits and stops everything. `chat` (the
+terminal client) and `tests` are listed but not started; select one and press
+`s`. Open http://localhost:5180. `backend/.env` needs `LLM_PROVIDER=brain` and a
+`GROQ_API_KEY` (speech-to-text). `BRAIN_PROVIDER=groq npm run dev` switches the
+brain to Groq models.
+
+## Run the pieces separately
 
 ```bash
 cd brain
