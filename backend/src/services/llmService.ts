@@ -1,6 +1,7 @@
 import axios from 'axios';
 import Groq from 'groq-sdk';
 import type { Turn } from '../models/types.js';
+import { streamTurn } from './brainClient.js';
 
 /**
  * Streaming, provider-agnostic LLM client for a general-purpose voice agent.
@@ -8,6 +9,8 @@ import type { Turn } from '../models/types.js';
  * Providers:
  *   - `groq`   — hosted, low latency, free tier. Default.
  *   - `ollama` — fully local/offline.
+ *   - `brain`  — the Python reasoning service (LangGraph). It keeps its own
+ *                history, so the gateway sends only the new utterance.
  *
  * Every call takes an AbortSignal so an in-flight generation dies the instant
  * the caller interrupts.
@@ -18,11 +21,13 @@ import type { Turn } from '../models/types.js';
  * to things it never actually said.
  */
 
-export type LlmProvider = 'ollama' | 'groq';
+export type LlmProvider = 'ollama' | 'groq' | 'brain';
 
 export function activeProvider(): LlmProvider {
   const raw = (process.env.LLM_PROVIDER || 'groq').toLowerCase();
-  return raw === 'ollama' ? 'ollama' : 'groq';
+  if (raw === 'ollama') return 'ollama';
+  if (raw === 'brain') return 'brain';
+  return 'groq';
 }
 
 const DEFAULT_PERSONA = `You are a helpful voice assistant. You are having a spoken conversation, so:
@@ -98,8 +103,14 @@ export async function* streamResponse(
   history: Turn[],
   signal: AbortSignal,
   resumeHint?: string | null,
-  onFinish?: (info: FinishInfo) => void
+  onFinish?: (info: FinishInfo) => void,
+  sessionId?: string
 ): AsyncGenerator<string> {
+  if (activeProvider() === 'brain') {
+    yield* streamFromBrain(query, sessionId ?? 'default', signal, onFinish);
+    return;
+  }
+
   const system = systemPrompt();
   const user = buildUserPrompt(query, history, resumeHint);
 
@@ -108,6 +119,45 @@ export async function* streamResponse(
   } else {
     yield* streamFromOllama(system, user, signal, onFinish);
   }
+}
+
+async function* streamFromBrain(
+  query: string,
+  sessionId: string,
+  signal: AbortSignal,
+  onFinish?: (info: FinishInfo) => void
+): AsyncGenerator<string> {
+  let tokens = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let reason: string | null = null;
+
+  for await (const event of streamTurn(sessionId, query, signal)) {
+    if (signal.aborted) return;
+    switch (event.type) {
+      case 'token':
+        tokens += 1;
+        yield event.text;
+        break;
+      case 'usage':
+        promptTokens += event.usage.promptTokens;
+        completionTokens += event.usage.completionTokens;
+        break;
+      case 'tool_call':
+        console.log(`🛠  brain tool call: ${event.name}(${JSON.stringify(event.args)})`);
+        break;
+      case 'tool_result':
+        console.log(`🛠  brain tool result: ${event.name}`);
+        break;
+      case 'done':
+        reason = event.degraded ? 'degraded' : 'stop';
+        break;
+      case 'error':
+        throw new Error(`Brain error: ${event.message}`);
+    }
+  }
+
+  onFinish?.({ reason, tokens, promptTokens, completionTokens });
 }
 
 async function* streamFromGroq(

@@ -28,6 +28,7 @@ import Groq from 'groq-sdk';
 import * as cost from './services/cost.js';
 import { resolveBargeCancel } from './services/bargeCancel.js';
 import { parseCall } from './eval/parseDiagnostics.js';
+import { SseParser, parseBrainEvent } from './services/brainClient.js';
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -417,6 +418,27 @@ check('paused with a turn in flight resumes speaking', resolveBargeCancel('pause
 check('paused after the turn finished returns to listening', resolveBargeCancel('paused', false), 'listen');
 for (const state of ['idle', 'listening', 'thinking', 'speaking', 'ended'] as const) {
   check(`a stale cancel while ${state} is ignored`, resolveBargeCancel(state, true), 'ignore');
+}
+
+console.log('\n--- brain event stream ---');
+{
+  const sse = new SseParser();
+  // sse-starlette frames with \r\n, and a network chunk can split anywhere.
+  const wire =
+    'event: token\r\ndata: {"type":"token","text":"Hel"}\r\n\r\n' +
+    ': keep-alive\r\n\r\n' +
+    'event: token\r\ndata: {"type":"token","text":"lo"}\r\n\r\n';
+  const events: Record<string, any>[] = [];
+  for (let i = 0; i < wire.length; i += 7) events.push(...sse.push(wire.slice(i, i + 7)));
+  check('events survive arbitrary chunk splits', events.map((e) => e.text), ['Hel', 'lo']);
+  check('keep-alive comments are ignored', events.length, 2);
+  check('a malformed block does not kill the stream', new SseParser().push('data: {oops\n\ndata: {"type":"token","text":"x"}\n\n').length, 1);
+  check('unknown event types are ignored', parseBrainEvent({ type: 'future_thing' }), null);
+  check(
+    'usage is mapped to camelCase',
+    parseBrainEvent({ type: 'usage', tier: 'mid', model: 'm', prompt_tokens: 5, completion_tokens: 2, usd: 0.1, degraded_from: 'frontier' }),
+    { type: 'usage', usage: { tier: 'mid', model: 'm', promptTokens: 5, completionTokens: 2, usd: 0.1, degradedFrom: 'frontier' } }
+  );
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
