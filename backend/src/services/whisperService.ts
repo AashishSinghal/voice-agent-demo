@@ -1,6 +1,7 @@
 import Groq from 'groq-sdk';
 import fs from 'fs';
 import type { TranscriptionResult } from '../models/types.js';
+import { describeError } from './logBridge.js';
 
 export async function transcribeAudioToText(audioPath: string): Promise<TranscriptionResult> {
   try {
@@ -11,7 +12,6 @@ export async function transcribeAudioToText(audioPath: string): Promise<Transcri
     }
 
     console.log(`🎤 Starting Whisper transcription via Groq API...`);
-    console.log(`🔑 API Key present: ${apiKey.substring(0, 10)}...`);
 
     const groq = new Groq({ apiKey });
 
@@ -34,7 +34,7 @@ export async function transcribeAudioToText(audioPath: string): Promise<Transcri
       language: 'en',
     };
   } catch (error: any) {
-    console.error('❌ Whisper transcription error:', error);
+    console.error(`❌ Whisper transcription error: ${describeError(error)}`);
 
     // Check if it's an API key error
     if (error?.status === 401 || error?.message?.includes('API key')) {

@@ -14,7 +14,12 @@ import { SentenceChunker } from './services/sentenceChunker.js';
 import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
 import { Conversation } from './services/conversation.js';
 import { Timeline } from './services/timeline.js';
-import { installLogBridge, subscribeToLogs } from './services/logBridge.js';
+import {
+  installLogBridge,
+  subscribeToSessionLogs,
+  runInSession,
+  describeError,
+} from './services/logBridge.js';
 import type { CallState, CostReport, TurnMetrics } from './models/types.js';
 import * as cost from './services/cost.js';
 
@@ -141,11 +146,21 @@ io.on('connection', (socket: Socket) => {
 
   // Everything this process prints, from here or from any service, goes to the
   // client so one exported file holds both halves of the conversation.
-  const unsubscribeLogs = subscribeToLogs((line) => {
+  // Scoped to this socket: the process is shared, and mirroring every line to
+  // every client would show one caller another's transcripts and replies.
+  const unsubscribeLogs = subscribeToSessionLogs(socket.id, (line) => {
     rawEmit('debug:trace', { level: line.level, text: line.text });
   });
 
-  console.log(`🔌 Client connected: ${socket.id}`);
+  // Event handlers run in whatever context emitted the packet, not the one
+  // that registered them, so tag each handler's execution with this session.
+  const registerOn = socket.on.bind(socket);
+  socket.on = ((event: string, handler: (...args: unknown[]) => unknown) =>
+    registerOn(event, (...args: unknown[]) =>
+      runInSession(socket.id, () => handler(...args))
+    )) as typeof socket.on;
+
+  runInSession(socket.id, () => console.log(`🔌 Client connected: ${socket.id}`));
 
   // Log every outbound event. Audio payloads are summarised, not dumped.
   socket.emit = ((event: string, payload?: Record<string, unknown>) => {
@@ -162,7 +177,7 @@ io.on('connection', (socket: Socket) => {
     return rawEmit(event, payload as never);
   }) as typeof socket.emit;
 
-  socket.onAny((event: string, payload?: Record<string, unknown>) => {
+  socket.onAny((event: string, payload?: Record<string, unknown>) => runInSession(socket.id, () => {
     const audio = payload?.audio as ArrayBuffer | undefined;
     const parts = payload
       ? Object.entries(payload)
@@ -172,7 +187,7 @@ io.on('connection', (socket: Socket) => {
     if (audio) parts.push(`audio=${audio.byteLength}B`);
     trace('<-', event, parts.join(' '));
     progress();
-  });
+  }));
 
   const session: Session = {
     conversation: new Conversation(),
@@ -463,7 +478,7 @@ io.on('connection', (socket: Socket) => {
       await speak(text, turnId, controller.signal, sttMs);
     } catch (error) {
       if (isAbort(error)) return;
-      console.error('❌ Turn failed:', error);
+      console.error(`❌ Turn failed: ${describeError(error)}`);
       socket.emit('error', {
         message: error instanceof Error ? error.message : 'Something went wrong',
       });
@@ -504,7 +519,7 @@ io.on('connection', (socket: Socket) => {
       socket.emit('response:done', { turnId, text: GREETING, metrics: null });
     } catch (error) {
       if (!isAbort(error)) {
-        console.error('❌ Greeting failed:', error);
+        console.error(`❌ Greeting failed: ${describeError(error)}`);
         socket.emit('error', { message: 'Could not start the call' });
       }
     } finally {
@@ -687,7 +702,7 @@ io.on('connection', (socket: Socket) => {
 
         await handleUtterance(result!.text, result!.ms);
       } catch (error) {
-        console.error('❌ audio:input failed:', error);
+        console.error(`❌ audio:input failed: ${describeError(error)}`);
         socket.emit('error', {
           message: error instanceof Error ? error.message : 'Could not process audio',
         });
@@ -749,7 +764,7 @@ io.on('connection', (socket: Socket) => {
    * nobody is left to move the call on. Rather than enumerate every such race,
    * recover from any busy state that has stopped making progress.
    */
-  const watchdog = setInterval(() => {
+  const watchdog = setInterval(() => runInSession(socket.id, () => {
     const busy =
       session.state === 'thinking' || session.state === 'speaking' || session.state === 'paused';
     if (!busy) return;
@@ -764,7 +779,7 @@ io.on('connection', (socket: Socket) => {
         `(budget ${budget}ms) — returning to listening`
     );
     backToListening('watchdog');
-  }, 2000);
+  }), 2000);
 
   socket.on('disconnect', () => {
     unsubscribeLogs();

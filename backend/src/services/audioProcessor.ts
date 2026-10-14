@@ -1,6 +1,7 @@
 import ffmpeg from 'fluent-ffmpeg';
 import path from 'path';
 import fs from 'fs';
+import { describeError } from './logBridge.js';
 
 /**
  * Prepare a recording for transcription.
@@ -67,6 +68,6 @@ export async function cleanupAudioFile(filePath: string): Promise<void> {
       console.log(`🗑️  Cleaned up: ${filePath}`);
     }
   } catch (error) {
-    console.error(`Failed to cleanup ${filePath}:`, error);
+    console.error(`Failed to cleanup ${filePath}: ${describeError(error)}`);
   }
 }

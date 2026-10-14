@@ -1,6 +1,13 @@
 import { Conversation } from './services/conversation.js';
 import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
-import { installLogBridge, subscribeToLogs, type LogLine } from './services/logBridge.js';
+import {
+  installLogBridge,
+  subscribeToLogs,
+  subscribeToSessionLogs,
+  runInSession,
+  describeError,
+  type LogLine,
+} from './services/logBridge.js';
 import { explainGroqTtsFailure } from './services/ttsService.js';
 import Groq from 'groq-sdk';
 import * as cost from './services/cost.js';
@@ -134,6 +141,43 @@ unsubscribe();
 const afterUnsubscribe = captured.length;
 console.log('should not be captured');
 check('unsubscribe works', captured.length, afterUnsubscribe);
+
+console.log('\n--- mirrored logs are per-session and scrubbed ---');
+{
+  const seenA: LogLine[] = [];
+  const seenB: LogLine[] = [];
+  const offA = subscribeToSessionLogs('A', (l) => seenA.push(l));
+  const offB = subscribeToSessionLogs('B', (l) => seenB.push(l));
+
+  console.log('outside any session');
+  runInSession('A', () => console.log('transcript for A'));
+  runInSession('B', () => console.log('transcript for B'));
+  // Context must survive an await, since that is how real turns log.
+  await runInSession('A', async () => {
+    await new Promise((r) => setTimeout(r, 5));
+    console.log('A after await');
+  });
+
+  check('A sees only its own lines', seenA.map((l) => l.text), ['transcript for A', 'A after await']);
+  check('B sees only its own lines', seenB.map((l) => l.text), ['transcript for B']);
+
+  process.env.GROQ_API_KEY = 'gsk_supersecretvalue1234567890';
+  runInSession('A', () => {
+    console.log('key is gsk_supersecretvalue1234567890');
+    console.error({ headers: { authorization: 'Bearer abcdef1234567890' } });
+  });
+  check('key redacted from mirrored text', seenA[2].text.includes('supersecret'), false);
+  check('auth header redacted', seenA[3].text.includes('abcdef1234'), false);
+  check('describeError drops headers', describeError(Object.assign(new Error('bad'), {
+    status: 401, headers: { authorization: 'Bearer zzzzzzzzzz' },
+  })), 'Error (401): bad');
+  delete process.env.GROQ_API_KEY;
+
+  offA();
+  runInSession('A', () => console.log('after unsubscribe'));
+  check('session unsubscribe works', seenA.length, 4);
+  offB();
+}
 
 console.log('\n--- groq tts failures explain themselves ---');
 const { APIError } = Groq as unknown as { APIError: { generate: (s: number, b: unknown, m: string, h: unknown) => Error } };

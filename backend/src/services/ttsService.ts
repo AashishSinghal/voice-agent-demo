@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import Groq from 'groq-sdk';
+import { redactSecrets } from './logBridge.js';
 
 /**
  * Text-to-speech, pluggable by provider.
@@ -133,7 +134,7 @@ function runSynth(
       signal?.removeEventListener('abort', onAbort);
       if (signal?.aborted) return; // already rejected
       if (code !== 0) {
-        console.error(`❌ ${bin} stderr:`, stderr);
+        console.error(`❌ ${bin} stderr: ${redactSecrets(stderr)}`);
         reject(new Error(`${bin} exited with code ${code}`));
         return;
       }
