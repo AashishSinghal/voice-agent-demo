@@ -228,41 +228,6 @@ const VoiceAgent = () => {
     if (!recorder.isRecording) beginRecording();
   }, [isCallActive, stream, recorder.isRecording, beginRecording, recorder]);
 
-  // Watchdog. Two failure modes to contain: a recording that is all silence
-  // (throw it away before it accumulates), and one where speech-end never
-  // fires (send it rather than listening forever).
-  useEffect(() => {
-    if (!recorder.isRecording) return;
-
-    const interval = window.setInterval(() => {
-      const now = Date.now();
-
-      if (!sawSpeechRef.current) {
-        // Only recycle during genuine quiet. Speech needs 250ms of sustained
-        // sound before it is confirmed, so a recycle fired on a timer alone
-        // lands squarely on the start of a sentence and throws the onset away
-        // — which is how "explain software engineering" became "engineering".
-        const level = levelRef.current ?? 0;
-        const quiet = level < (calibrationRef.current?.silenceThreshold ?? 0);
-
-        if (quiet && now - recordingStartedAtRef.current > IDLE_RECYCLE_MS) {
-          trace('recycled recording', 'only silence captured');
-          recorder.discardRecording();
-        }
-        return;
-      }
-
-      if (now - speechStartedAtRef.current > MAX_TURN_MS) {
-        trace('max turn length', 'force-sending recording');
-        sawSpeechRef.current = false;
-        setUserSpeaking(false);
-        recorder.stopRecording();
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [recorder.isRecording, recorder, trace, setUserSpeaking]);
-
   /**
    * Caller started speaking over the agent.
    *
@@ -377,6 +342,41 @@ const VoiceAgent = () => {
       silenceFactor: SILENCE_FACTOR,
     }
   );
+
+  // Watchdog. Two failure modes to contain: a recording that is all silence
+  // (throw it away before it accumulates), and one where speech-end never
+  // fires (send it rather than listening forever).
+  useEffect(() => {
+    if (!recorder.isRecording) return;
+
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+
+      if (!sawSpeechRef.current) {
+        // Only recycle during genuine quiet. Speech needs 250ms of sustained
+        // sound before it is confirmed, so a recycle fired on a timer alone
+        // lands squarely on the start of a sentence and throws the onset away
+        // — which is how "explain software engineering" became "engineering".
+        const level = levelRef.current ?? 0;
+        const quiet = level < (calibrationRef.current?.silenceThreshold ?? 0);
+
+        if (quiet && now - recordingStartedAtRef.current > IDLE_RECYCLE_MS) {
+          trace('recycled recording', 'only silence captured');
+          recorder.discardRecording();
+        }
+        return;
+      }
+
+      if (now - speechStartedAtRef.current > MAX_TURN_MS) {
+        trace('max turn length', 'force-sending recording');
+        sawSpeechRef.current = false;
+        setUserSpeaking(false);
+        recorder.stopRecording();
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [recorder.isRecording, recorder, trace, setUserSpeaking]);
 
   const handleStart = useCallback(async () => {
     diag.reset();

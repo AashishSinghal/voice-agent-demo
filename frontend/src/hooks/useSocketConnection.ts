@@ -141,6 +141,9 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionAttempts: 5,
+      // Only sent when the backend sets ACCESS_TOKEN. Baked into the public
+      // bundle, so it deters casual use rather than keeping a secret.
+      auth: { token: import.meta.env.VITE_ACCESS_TOKEN ?? '' },
     });
     socketRef.current = socket;
 
@@ -171,6 +174,12 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     socket.on('connect', () => {
       diag.log('socket-in', 'connect');
       setConnected(true);
+    });
+    // The server refuses a handshake with a readable reason (rate limit, bad
+    // token); show it instead of failing silently.
+    socket.on('connect_error', (err: Error) => {
+      diag.log('socket-in', 'connect_error', { message: err.message });
+      addMessage({ type: 'system', text: err.message, status: 'error' });
     });
     socket.on('disconnect', (reason: string) => {
       diag.log('socket-in', 'disconnect', { reason });

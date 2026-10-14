@@ -113,7 +113,7 @@ export const useVoiceActivityDetection = (
     };
   }, []);
 
-  const check = useCallback(() => {
+  const check = useCallback(function check() {
     const analyser = analyserRef.current;
     if (!analyser) return;
 

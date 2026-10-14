@@ -112,7 +112,7 @@ export const useAudioPlayback = ({
     }
   }, []);
 
-  const playNext = useCallback(() => {
+  const playNext = useCallback(function playNext() {
     if (pausedRef.current) {
       diag.log('audio', 'play skipped', {
         reason: 'paused',

@@ -36,8 +36,11 @@ curl -s localhost:3000/health
 `TTS_PROVIDER` selects the engine:
 
 - **`say`** — macOS built-in. No setup, nothing to download. Use this locally.
-- **`piper`** — bundled binary plus an ONNX voice. Used in Docker and
-  deployment.
+- **`groq`** — hosted Orpheus. The deployed default: synthesis is a network
+  call, so the 0.1 vCPU free instance copes.
+- **`piper`** — binary plus an ONNX voice. Opt-in
+  (`docker build --build-arg INSTALL_PIPER=true`): no quota, but on the free
+  instance one sentence took ~29s, so it needs a paid one.
 
 The voice model is ~63MB and deliberately not committed: git would keep it in
 history forever, GitHub warns past 50MB, and it belongs to its publisher rather

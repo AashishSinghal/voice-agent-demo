@@ -1,6 +1,7 @@
 export interface TranscriptionResult {
   text: string;
-  confidence: number;
+  /** 0..1 from Whisper's segment statistics, or null if none were reported. */
+  confidence: number | null;
   language: string;
 }
 
