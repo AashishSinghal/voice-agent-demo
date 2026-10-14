@@ -171,6 +171,18 @@ Names only; see `backend/.env.example` for defaults and comments. Never commit
   UptimeRobot ping on `/health` every 5 minutes keeps it warm and fits the 750
   free hours for exactly one service.
 - **Build for amd64.** An arm64 image built on a Mac will not start on Render.
+- **A new turn must silence the old one in the browser.** Aborting generation on
+  the server does not stop audio already sent. `supersedeInFlightTurn` emits
+  `turn:interrupted` whenever a turn is replaced, and the playback hook releases
+  the chunk playing from an older turn (`lib/interruptionRules.ts`). It once only
+  dropped *queued* chunks, so the answer kept playing after being replaced.
+- **Audio arriving into live speech is held.** The first chunk can land while the
+  caller is mid-sentence (before speech is confirmed, or while the state reads
+  "thinking"); it starts paused and is reported as a barge.
+- **"Stop" is a halt, not a question.** Interruptions start a new turn, so without
+  the `halt` class the agent answered "stop" with a paragraph. Barge-in uses a
+  shorter onset and minimum than a normal turn (`BARGE_SPEECH_MS`,
+  `BARGE_MIN_SPOKEN_MS`) because "stop" is under 250 ms.
 - Every `console.*` line is bridged to the client diagnostic log
   (`logBridge.ts`), but only to the session that printed it (AsyncLocalStorage;
   socket handlers run via `runInSession`). Never log raw error objects or keys:
