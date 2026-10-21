@@ -149,8 +149,13 @@ async function* streamFromBrain(
       case 'tool_result':
         console.log(`🛠  brain tool result: ${event.name}`);
         break;
+      case 'approval_required':
+        // The question itself arrives as ordinary tokens and is spoken as such;
+        // the caller's next utterance is the answer, routed back through here.
+        console.log(`🔐 brain awaiting approval: ${event.tool}`);
+        break;
       case 'done':
-        reason = event.degraded ? 'degraded' : 'stop';
+        reason = event.awaitingApproval ? 'awaiting_approval' : event.degraded ? 'degraded' : 'stop';
         break;
       case 'error':
         throw new Error(`Brain error: ${event.message}`);

@@ -27,8 +27,9 @@ Every stream ends with exactly one `done` or `error`.
 | `token` | `text` | Streamed reply text. This is what the voice loop speaks |
 | `tool_call` | `id`, `name`, `args` | The model asked for a tool |
 | `tool_result` | `id`, `name`, `content` | The tool's output |
+| `approval_required` | `call_id`, `tool`, `args`, `prompt` | The graph paused on a risky tool call. `prompt` has already been streamed as `token`s |
 | `usage` | `tier`, `model`, `prompt_tokens`, `completion_tokens`, `usd`, `turn_usd`, `degraded_from` | One model call's cost |
-| `done` | `text`, `turn_usd`, `steps`, `degraded` | Terminal. `degraded` means the cost guard intervened |
+| `done` | `text`, `turn_usd`, `steps`, `degraded`, `awaiting_approval` | Terminal. `degraded` means the cost guard intervened; `awaiting_approval` means the next utterance answers a question |
 | `error` | `message` | Terminal |
 
 Unknown event types must be ignored, so the brain can add events without a
@@ -62,9 +63,22 @@ the next `/v1/turn` for the same session wait for it.
 
 `{ "sessionId", "messages", "sessionUsd" }`. Introspection and tests.
 
+## Approvals
+
+When a turn ends with `awaiting_approval: true`, the next `POST /v1/turn` for
+that session is interpreted as the answer (see `docs/MCP.md`): an unambiguous
+yes runs the action, a no declines it, anything else declines it silently and is
+handled as a new request. The gateway sends nothing special; it just forwards
+the caller's next utterance. `/heard` is ignored while a question is pending.
+
+## `GET /v1/tools`
+
+`[{ "name", "risk", "connector" }]`: what the model can call and how each is gated.
+
 ## `GET /health`
 
-Provider, active tiers and the per-turn budget.
+Provider, active tiers, the per-turn budget and each connector's status
+(`ok`, its tools, or the error that kept it from starting).
 
 ## Cost and degradation
 

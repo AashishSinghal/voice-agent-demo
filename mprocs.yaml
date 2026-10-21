@@ -1,0 +1,33 @@
+# One terminal, every process. `npm run dev` from the repo root.
+#
+#   up/down or j/k   pick a process        a     add a process
+#   enter / ctrl+a   focus its pane        x     stop      r   restart
+#   ctrl+a again     back to the list      s     start     ?   all keys
+#   q                quit (stops everything)
+#
+# Switch the brain's model without editing this file:
+#   BRAIN_PROVIDER=groq npm run dev        (needs GROQ_API_KEY in backend/.env)
+procs:
+  brain:
+    cwd: brain
+    shell: >-
+      BRAIN_PROVIDER=${BRAIN_PROVIDER:-ollama}
+      BRAIN_LOCAL_MODEL=${BRAIN_LOCAL_MODEL:-llama3.1:8b}
+      uv run uvicorn app.main:create_app --factory --port 8000 --reload
+
+  gateway:
+    cwd: backend
+    shell: npm run dev
+
+  frontend:
+    cwd: frontend
+    shell: npm run dev -- --port 5180 --strictPort
+
+  # Not started automatically: select one and press `s`.
+  chat:
+    cwd: brain
+    shell: uv run python scripts/chat.py
+    autostart: false
+  tests:
+    shell: npm test
+    autostart: false

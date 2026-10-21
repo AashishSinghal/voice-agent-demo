@@ -1,0 +1,13 @@
+{
+  "name": "voice-agent",
+  "private": true,
+  "description": "Dev orchestration for the gateway, brain and frontend",
+  "scripts": {
+    "setup": "npm ci --prefix backend && npm ci --prefix frontend && cd brain && uv sync",
+    "dev": "mprocs",
+    "test": "npm test --prefix backend && cd brain && uv run pytest -q"
+  },
+  "devDependencies": {
+    "mprocs": "^0.9.6"
+  }
+}

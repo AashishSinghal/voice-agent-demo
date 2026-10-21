@@ -23,6 +23,8 @@ class Settings:
     context_window: int = 6000
     reserve_output: int = 512
     tiers: list[Tier] = field(default_factory=list)
+    connectors_config: str | None = None  # path to an mcp.json
+    approval_ttl_s: int = 600
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -45,4 +47,6 @@ class Settings:
             context_window=_int("BRAIN_CONTEXT_TOKENS", 6000),
             reserve_output=_int("BRAIN_RESERVE_OUTPUT", 512),
             tiers=tiers,
+            connectors_config=os.environ.get("BRAIN_MCP_CONFIG", "./mcp.json"),
+            approval_ttl_s=_int("BRAIN_APPROVAL_TTL_S", 600),
         )
