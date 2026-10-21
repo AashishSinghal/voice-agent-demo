@@ -1,3 +1,4 @@
+import pytest
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -154,3 +155,36 @@ async def test_per_turn_counters_reset_but_session_total_accumulates():
     assert d2.steps == 1 and d1.steps == 1
     state = await graph.aget_state({"configurable": {"thread_id": "s1"}})
     assert state.values["session_usd"] > d2.turn_usd
+
+
+class SlowModel(ScriptedChatModel):
+    """Blocks long enough for a test to cancel the turn mid-generation."""
+
+    def _generate(self, *a, **k):
+        import time
+
+        time.sleep(1.0)
+        return super()._generate(*a, **k)
+
+    def _stream(self, *a, **k):
+        import time
+
+        time.sleep(1.0)
+        yield from super()._stream(*a, **k)
+
+
+async def test_a_turn_cancelled_by_an_interruption_still_saves_the_callers_message():
+    """The checkpoint is written once, when the run ends. An interruption cancels
+    the run mid-generation, and /heard assumes the caller's message was saved: if
+    it were not, the thread would gain an assistant reply with no question."""
+    import asyncio
+
+    g = build_graph(settings(), MemorySaver(), SlowModel(script=[AIMessage(content="never finished")]))
+    task = asyncio.create_task(collect(g, "caller said this", "cancelled"))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.1)
+    snapshot = await g.aget_state({"configurable": {"thread_id": "cancelled"}})
+    assert [m.content for m in snapshot.values["messages"]] == ["caller said this"]
