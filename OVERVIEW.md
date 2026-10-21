@@ -168,7 +168,8 @@ tells you nothing.
 
 The agent now generates its own evaluation data as a by-product of being used.
 
-**Record a call.** Optional, off by default, never uploaded. Both voices are
+**Record a call.** On by default, announced when the call starts, with a one-tap
+off, and never uploaded. Both voices are
 captured on *separate* tracks — a mixed recording cannot be scored, because you
 cannot tell whose voice you are evaluating, and the moments worth evaluating
 are exactly the ones where both are talking.

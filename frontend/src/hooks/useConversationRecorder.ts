@@ -112,8 +112,9 @@ export const useConversationRecorder = () => {
     }
   };
 
-  const start = useCallback((callerStream: MediaStream, agentStream: MediaStream | null) => {
-    if (callerRef.current) return;
+  /** Returns whether recording actually began, so the caller never claims it did when it did not. */
+  const start = useCallback((callerStream: MediaStream, agentStream: MediaStream | null): boolean => {
+    if (callerRef.current) return true;
 
     startedAtRef.current = Date.now();
     callerRef.current = startTrack(callerStream);
@@ -124,6 +125,23 @@ export const useConversationRecorder = () => {
       setRecording(null);
       diag.log('audio', 'conversation recording started', { agentTrack: !!agentRef.current });
     }
+    return callerRef.current !== null;
+  }, []);
+
+  /** Stop and throw the audio away: the caller changed their mind mid-call. */
+  const discard = useCallback(() => {
+    for (const track of [callerRef.current, agentRef.current]) {
+      if (!track) continue;
+      track.recorder.ondataavailable = null;
+      track.recorder.onstop = null;
+      if (track.recorder.state !== 'inactive') track.recorder.stop();
+      track.chunks.length = 0;
+    }
+    callerRef.current = null;
+    agentRef.current = null;
+    setIsRecording(false);
+    setRecording(null);
+    diag.log('audio', 'conversation recording discarded');
   }, []);
 
   const stop = useCallback(async (): Promise<ConversationRecording | null> => {
@@ -165,5 +183,5 @@ export const useConversationRecorder = () => {
     return result;
   }, []);
 
-  return { start, stop, isRecording, recording };
+  return { start, stop, discard, isRecording, recording };
 };
