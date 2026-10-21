@@ -119,6 +119,8 @@ io.use((socket, next) => {
 
 /** Per-process scratch space for uploaded clips; never the working directory. */
 const UPLOAD_DIR = path.join(os.tmpdir(), 'voice-agent-uploads');
+/** Spoken when the model returns no text at all, rather than saying nothing. */
+const EMPTY_ANSWER = "Sorry, I lost my train of thought. Could you say that again?";
 const GREETING = process.env.AGENT_GREETING || "Hey, I'm listening. What can I help you with?";
 const STT_TIMEOUT_MS = 20_000;
 /**
@@ -355,6 +357,15 @@ io.on('connection', (socket: Socket) => {
 
     for (const chunk of chunker.flush()) await emitChunk(chunk);
 
+    // A generation that produced nothing must not be silent. The call would
+    // otherwise sit in "thinking" with no word spoken until the watchdog fired.
+    if (!signal.aborted && !fullText.trim()) {
+      note('empty generation', { turnId, reason: finish.info?.reason ?? 'unreported' });
+      fullText = EMPTY_ANSWER;
+      socket.emit('response:text:delta', { turnId, token: EMPTY_ANSWER });
+      await emitChunk(EMPTY_ANSWER);
+    }
+
     if (signal.aborted) {
       // Synthesis already happened for whatever played before the caller cut
       // in, and it was billed. Dropping the turn silently here would quietly
@@ -579,6 +590,7 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('call:start', async () => {
     console.log(`📞 Call started: ${socket.id}`);
+    if (llm.activeProvider() === 'brain') brain.warmUp();
     session.conversation.reset();
     session.turnId += 1;
     session.resumeHint = null;

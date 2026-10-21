@@ -29,6 +29,18 @@ export type BrainEvent =
   | { type: 'done'; text: string; turnUsd: number; steps: number; degraded: boolean; awaitingApproval: boolean }
   | { type: 'error'; message: string };
 
+/**
+ * Headers for every request to the brain. When BRAIN_API_KEY is set the brain
+ * refuses callers without it; locally it is unset and the brain is open.
+ */
+export function brainHeaders(
+  extra: Record<string, string> = {},
+  env: Record<string, string | undefined> = process.env
+): Record<string, string> {
+  const key = env.BRAIN_API_KEY;
+  return { ...extra, ...(key ? { authorization: `Bearer ${key}` } : {}) };
+}
+
 export function brainUrl(): string {
   return (process.env.BRAIN_URL || 'http://localhost:8000').replace(/\/$/, '');
 }
@@ -125,7 +137,7 @@ export async function* streamTurn(
   await pendingHeard.get(sessionId);
   const response = await fetch(`${brainUrl()}/v1/turn`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+    headers: brainHeaders({ 'content-type': 'application/json', accept: 'text/event-stream' }),
     body: JSON.stringify({ session_id: sessionId, text }),
     signal,
   });
@@ -155,7 +167,7 @@ async function postHeard(sessionId: string, spoken: string, unspoken: string | n
   try {
     await fetch(`${brainUrl()}/v1/threads/${encodeURIComponent(sessionId)}/heard`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: brainHeaders({ 'content-type': 'application/json' }),
       body: JSON.stringify({ spoken, unspoken }),
       signal: AbortSignal.timeout(3000),
     });
@@ -163,4 +175,17 @@ async function postHeard(sessionId: string, spoken: string, unspoken: string | n
     // The call must not stall on a bookkeeping failure.
     console.warn(`Could not report heard text to the brain: ${(error as Error).message}`);
   }
+}
+
+/**
+ * Wake the brain before the first turn needs it.
+ *
+ * A serverless brain scales to zero, and its first request after idle pays for
+ * starting Python and importing the graph. A call opens with a greeting that
+ * takes seconds to synthesise and play, which is time the brain can spend
+ * waking up, so the cost is hidden instead of landing on the caller's first
+ * question. Failure is ignored: the first real turn simply pays it instead.
+ */
+export function warmUp(): void {
+  fetch(`${brainUrl()}/health`, { signal: AbortSignal.timeout(20_000) }).catch(() => {});
 }

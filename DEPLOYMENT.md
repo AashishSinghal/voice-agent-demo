@@ -167,3 +167,58 @@ sharing the link widely.
 - Single instance, no horizontal scaling — fine for a demo, not for production.
 - Free-tier rate limits are the real capacity ceiling, not the architecture.
 - No persistence: conversation state lives in memory per socket and dies with it.
+
+## Hosting the brain (Vercel + Neon)
+
+The brain is a separate Python service (`LLM_PROVIDER=brain`). It does not fit on
+the gateway's free Render box (a second always-on service would exceed the 750
+free hours), so it runs as a Vercel Python function with Postgres on Neon.
+
+```
+Browser ──WebSocket──> Gateway (Render) ──HTTPS + bearer key──> Brain (Vercel, iad1)
+                                                                    │
+                                                          pooled connection
+                                                                    ▼
+                                                            Postgres (Neon, Ohio)
+```
+
+Why these choices:
+
+- **Vercel Hobby with Fluid compute**: 1 vCPU / 2 GB and up to 300 s per request,
+  against 0.1 vCPU / 512 MB on Render free. No always-on hours to ration.
+- **Postgres, not SQLite**: a serverless function has no durable disk and
+  consecutive requests can run on different instances, so the checkpoint (the
+  conversation, and any pending approval) has to live where they can all reach it.
+- **A pooled connection with prepared statements off** (`app/store.py`): Neon and
+  Supabase serve serverless clients through a transaction-mode pooler, where
+  server-side prepared statements fail intermittently.
+- **A shared secret** (`BRAIN_API_KEY`): a Vercel URL is public. The gateway sends
+  it; the brain refuses every `/v1` request without it.
+- **Lazy startup**: connectors and the database pool are built on the first
+  request, not in FastAPI's startup hook, which a serverless host may not run.
+- **A warm-up on call start**: the gateway pings the brain while the greeting
+  plays, so a cold start overlaps with it instead of delaying the first answer.
+
+### Setup
+
+1. **Neon**: create a project with only Postgres enabled. From *Connect*, copy the
+   **pooled** string (host contains `-pooler`) and the **direct** string.
+2. **Locally**: put them in `brain/.env` (gitignored) as `BRAIN_DATABASE_URL` and
+   `BRAIN_DATABASE_URL_DIRECT`, then create the tables once:
+   `cd brain && uv run python scripts/init_db.py`. To prove the pooled path works
+   against the real database: `BRAIN_TEST_DATABASE_URL=<pooled url> uv run pytest tests/test_cloud.py`.
+3. **Vercel**: a new project from this repo with **Root Directory `brain`**.
+   Environment variables: `BRAIN_PROVIDER=groq`, `GROQ_API_KEY`,
+   `BRAIN_DATABASE_URL` (pooled), `BRAIN_API_KEY` (a long random string).
+4. **Render** (gateway): `LLM_PROVIDER=brain`, `BRAIN_URL=https://<brain>.vercel.app`,
+   `BRAIN_API_KEY` (the same value).
+
+### What is not verified
+
+Written before the first deploy. Vercel's docs do not say whether `/tmp` is
+writable, whether FastAPI startup hooks run, or whether a function may spawn a
+subprocess, so a first deploy should check `/health` and a real turn before
+anything else. Connectors that run a local process (the Notes server, and Notion
+through `npx`) will not work on Vercel; the hosted Notion server needs the
+Streamable HTTP and OAuth transport, which is not built yet.
+

@@ -165,6 +165,27 @@ async function* streamFromBrain(
   onFinish?.({ reason, tokens, promptTokens, completionTokens });
 }
 
+/**
+ * gpt-oss models think before they speak, and the thinking is generated first
+ * and counts against max_tokens. Measured on this prompt set at default effort:
+ * "tell me a long story" spent 218 of its 220 tokens reasoning and returned an
+ * empty answer; an ordinary question spent 128 of 204 on thoughts nobody hears.
+ * At "low" reasoning fell to 5 to 12 tokens, every prompt answered, and there is
+ * less to generate before the first word is spoken.
+ *
+ * Only sent to models that accept it. GROQ_REASONING_EFFORT=none turns it off.
+ */
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'default';
+const EFFORTS: readonly string[] = ['low', 'medium', 'high', 'default'];
+
+export function reasoningParams(model: string): { reasoning_effort?: ReasoningEffort } {
+  const configured = (process.env.GROQ_REASONING_EFFORT ?? 'low').toLowerCase();
+  if (configured === 'none' || !model.includes('gpt-oss')) return {};
+  // An unrecognised value falls back to low rather than sending something the
+  // API would reject and leaving every turn failing.
+  return { reasoning_effort: (EFFORTS.includes(configured) ? configured : 'low') as ReasoningEffort };
+}
+
 async function* streamFromGroq(
   system: string,
   user: string,
@@ -192,6 +213,7 @@ async function* streamFromGroq(
       top_p: 0.9,
       max_tokens: 220,
       stream: true,
+      ...reasoningParams(model),
     },
     { signal }
   );

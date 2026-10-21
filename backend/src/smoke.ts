@@ -27,8 +27,9 @@ import { confidenceFromSegments, sttLanguage } from './services/whisperService.j
 import Groq from 'groq-sdk';
 import * as cost from './services/cost.js';
 import { resolveBargeCancel } from './services/bargeCancel.js';
+import { reasoningParams } from './services/llmService.js';
 import { parseCall } from './eval/parseDiagnostics.js';
-import { SseParser, parseBrainEvent } from './services/brainClient.js';
+import { SseParser, parseBrainEvent, brainHeaders } from './services/brainClient.js';
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -426,6 +427,28 @@ check('payload-less trace lines ignored', parsed.events.some((e) => e.name.inclu
 
 // A silent stretch fires speech-end without a send; it must not invent an utterance.
 check('unpaired speech-end ignored', parsed.utterances.every((u) => u.bytes > 0), true);
+
+console.log('\n--- brain auth header ---');
+check('no key, no header', brainHeaders({ accept: 'x' }, {}), { accept: 'x' });
+check('a key is sent as a bearer token', brainHeaders({}, { BRAIN_API_KEY: 'k' }), { authorization: 'Bearer k' });
+check('it is added alongside other headers', brainHeaders({ a: 'b' }, { BRAIN_API_KEY: 'k' }), { a: 'b', authorization: 'Bearer k' });
+check('an empty key counts as unset', brainHeaders({}, { BRAIN_API_KEY: '' }), {});
+
+console.log('\n--- groq reasoning effort ---');
+{
+  const saved = process.env.GROQ_REASONING_EFFORT;
+  delete process.env.GROQ_REASONING_EFFORT;
+  check('gpt-oss gets low reasoning by default', reasoningParams('openai/gpt-oss-20b'), { reasoning_effort: 'low' });
+  check('other models are not sent the parameter', reasoningParams('llama-3.3-70b-versatile'), {});
+  process.env.GROQ_REASONING_EFFORT = 'none';
+  check('it can be turned off', reasoningParams('openai/gpt-oss-20b'), {});
+  process.env.GROQ_REASONING_EFFORT = 'bogus';
+  check('an invalid value falls back to low', reasoningParams('openai/gpt-oss-20b'), { reasoning_effort: 'low' });
+  process.env.GROQ_REASONING_EFFORT = 'medium';
+  check('it can be raised', reasoningParams('openai/gpt-oss-120b'), { reasoning_effort: 'medium' });
+  if (saved === undefined) delete process.env.GROQ_REASONING_EFFORT;
+  else process.env.GROQ_REASONING_EFFORT = saved;
+}
 
 console.log('\n--- barge cancelled ---');
 check('paused with a turn in flight resumes speaking', resolveBargeCancel('paused', true), 'resume');

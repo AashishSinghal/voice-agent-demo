@@ -8,6 +8,7 @@ phase) free to run on every pull request.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from typing import Any
 
@@ -94,7 +95,12 @@ def build_model(tier: Tier, fake: BaseChatModel | None = None) -> BaseChatModel:
     if tier.provider == "groq":
         from langchain_groq import ChatGroq
 
-        return ChatGroq(model=tier.model, temperature=0.7, max_tokens=220, streaming=True)
+        # gpt-oss thinks before it speaks, and the thinking counts against
+        # max_tokens: at default effort a long-form prompt spent 218 of 220
+        # tokens reasoning and returned no text. "low" cut that to about ten.
+        effort = os.environ.get("GROQ_REASONING_EFFORT", "low").lower()
+        extra = {"reasoning_effort": effort} if effort != "none" and "gpt-oss" in tier.model else {}
+        return ChatGroq(model=tier.model, temperature=0.7, max_tokens=220, streaming=True, **extra)
     if tier.provider == "ollama":
         from langchain_ollama import ChatOllama
 

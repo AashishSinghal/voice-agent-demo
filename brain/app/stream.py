@@ -84,8 +84,17 @@ async def _drive(graph, graph_input, config) -> AsyncIterator[Event]:
     final_text = ""
     awaiting = False
     try:
+        # Write the checkpoint once, when the run ends, instead of after every
+        # step. Against hosted Postgres each write is a network round trip: warm
+        # turns measured about 3.2 s with per-step writes and 1.1 s with one, at
+        # 240 ms per round trip. The checkpoint is still written if the run is
+        # cancelled or pauses on a question, which an interruption and an
+        # approval need; a crash mid-turn loses only that turn.
         async for mode, data in graph.astream(
-            graph_input, config, stream_mode=["messages", "custom", "updates"]
+            graph_input,
+            config,
+            stream_mode=["messages", "custom", "updates"],
+            durability="exit",
         ):
             if mode == "messages":
                 chunk, meta = data

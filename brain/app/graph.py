@@ -22,7 +22,10 @@ State is checkpointed per thread, so a conversation survives a restart.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
+from collections.abc import Mapping
 from typing import Annotated, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -42,6 +45,8 @@ from .settings import Settings
 from .tokens import count_text
 from .tools import ToolSet
 
+log = logging.getLogger("graph")
+
 SYSTEM_PROMPT = (
     "You are a helpful voice assistant in a spoken conversation. Keep answers "
     "short, speak naturally, and use no lists, markdown or emoji. Use a tool "
@@ -54,6 +59,7 @@ SYSTEM_PROMPT = (
 DECLINED_TEXT = "Okay, I won't do that."
 
 HALT_TEXT = "I got stuck going in circles on that, so I stopped. Could you ask it a different way?"
+UNAVAILABLE_TEXT = "I'm having trouble reaching my language model right now. Please try again in a moment."
 OVER_BUDGET_TEXT = "I've used up what I'm allowed to spend on that request, so I can't answer it right now."
 
 
@@ -70,7 +76,7 @@ class State(TypedDict, total=False):
 def build_graph(
     settings: Settings,
     checkpointer: BaseCheckpointSaver | None = None,
-    fake_model: BaseChatModel | None = None,
+    fake_model: BaseChatModel | Mapping[str, BaseChatModel] | None = None,
     toolset: ToolSet | None = None,
 ):
     guard = CostGuard(tiers=settings.tiers, cap_usd=settings.turn_budget_usd, max_steps=settings.max_steps)
@@ -92,25 +98,51 @@ def build_graph(
         )
         write({"type": "context", "report": ctx.report.to_dict()})
 
-        decision = guard.select(
-            prompt_tokens=ctx.report.total_used,
-            max_output_tokens=settings.reserve_output,
-            steps=steps,
-            spent_usd=turn_usd,
-        )
-
-        if decision.action != "call" or decision.tier is None:
-            text = HALT_TEXT if decision.action == "halt" else OVER_BUDGET_TEXT
-            write({"type": "token", "text": text})
-            return {
-                "messages": [AIMessage(content=text)],
-                "steps": steps + 1,
-                "degraded": True,
-            }
-
         kept = {s["function"]["name"] for s in ctx.tools}
-        model = build_model(decision.tier, fake_model).bind_tools([t for t in tools if t.name in kept])
-        response = await model.ainvoke(ctx.messages)
+        bound_tools = [t for t in tools if t.name in kept]
+        preferred = settings.tiers[0].name if settings.tiers else None
+
+        # Walk the chain. A tier that is over budget is skipped by the guard; a
+        # tier that errors (rate limited, down) is marked unavailable for the
+        # rest of this call and the next one is tried, so an outage at one
+        # provider degrades the answer instead of ending the turn.
+        failed: dict[str, str] = {}
+        decision = None
+        response = None
+        while response is None:
+            decision = guard.select(
+                prompt_tokens=ctx.report.total_used,
+                max_output_tokens=settings.reserve_output,
+                steps=steps,
+                spent_usd=turn_usd,
+                unavailable=frozenset(failed),
+            )
+            if decision.action != "call" or decision.tier is None:
+                if decision.action == "halt":
+                    text = HALT_TEXT
+                elif failed:
+                    text = UNAVAILABLE_TEXT
+                else:
+                    text = OVER_BUDGET_TEXT
+                write({"type": "token", "text": text})
+                return {
+                    "messages": [AIMessage(content=text)],
+                    "steps": steps + 1,
+                    "degraded": True,
+                }
+            try:
+                fake = fake_model[decision.tier.name] if isinstance(fake_model, Mapping) else fake_model
+                model = build_model(decision.tier, fake).bind_tools(bound_tools)
+                response = await model.ainvoke(ctx.messages)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failed[decision.tier.name] = f"{type(exc).__name__}: {exc}"
+                log.warning(
+                    "tier %s failed, stepping down: %s", decision.tier.name, failed[decision.tier.name]
+                )
+
+        degraded_from = preferred if decision.tier.name != preferred else decision.degraded_from
 
         usage = getattr(response, "usage_metadata", None) or {}
         prompt_tokens = usage.get("input_tokens") or ctx.report.total_used
@@ -126,7 +158,7 @@ def build_graph(
                 "completion_tokens": completion_tokens,
                 "usd": usd,
                 "turn_usd": turn_usd + usd,
-                "degraded_from": decision.degraded_from,
+                "degraded_from": degraded_from,
             }
         )
         return {
@@ -134,7 +166,7 @@ def build_graph(
             "steps": steps + 1,
             "turn_usd": turn_usd + usd,
             "session_usd": state.get("session_usd", 0.0) + usd,
-            "degraded": bool(decision.degraded_from) or state.get("degraded", False),
+            "degraded": bool(degraded_from) or state.get("degraded", False),
         }
 
     def gate(state: State) -> dict:

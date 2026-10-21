@@ -61,18 +61,11 @@ def test_thread_endpoint_reports_persisted_messages(tmp_path):
 def test_heard_rewrites_last_reply_to_what_was_spoken(tmp_path):
     with TestClient(make(tmp_path)) as c:
         c.post("/v1/turn", json={"session_id": "h", "text": "tell me"})
-        r = c.post(
-            "/v1/threads/h/heard",
-            json={"spoken": "Hi from", "unspoken": "the brain and more"},
-        )
+        r = c.post("/v1/threads/h/heard", json={"spoken": "Hi from", "unspoken": "the brain and more"})
         assert r.json() == {"updated": True}
-        state = c.app.state.graph
-        import asyncio
-
-        values = asyncio.run(state.aget_state({"configurable": {"thread_id": "h"}})).values
-        last = values["messages"][-1]
-        assert last.content == "Hi from"
-        assert last.additional_kwargs["interrupted"] and last.additional_kwargs["unspoken"]
+        last = c.get("/v1/threads/h").json()["history"][-1]
+        assert last["content"] == "Hi from"
+        assert last["interrupted"] is True and last["unspoken"] == "the brain and more"
 
 
 def test_heard_with_nothing_spoken_removes_the_reply(tmp_path):
@@ -85,20 +78,23 @@ def test_heard_with_nothing_spoken_removes_the_reply(tmp_path):
 def test_heard_appends_when_the_reply_never_reached_the_checkpoint(tmp_path):
     """Interrupted before the graph saved its answer: the thread ends on the
     caller's message. The previous turn's answer must not be overwritten."""
-    import asyncio
-
     from langchain_core.messages import HumanMessage
 
     with TestClient(make(tmp_path)) as c:
         c.post("/v1/turn", json={"session_id": "p", "text": "first"})
-        graph = c.app.state.graph
-        cfg = {"configurable": {"thread_id": "p"}}
-        asyncio.run(
-            graph.aupdate_state(cfg, {"messages": [HumanMessage(content="second")]}, as_node="call_model")
-        )
+
+        async def end_on_callers_message():
+            graph = (await c.app.state.get_runtime()).graph
+            await graph.aupdate_state(
+                {"configurable": {"thread_id": "p"}},
+                {"messages": [HumanMessage(content="second")]},
+                as_node="call_model",
+            )
+
+        c.portal.call(end_on_callers_message)
         c.post("/v1/threads/p/heard", json={"spoken": "Partial", "unspoken": "rest"})
-        msgs = asyncio.run(graph.aget_state(cfg)).values["messages"]
-        assert [m.content for m in msgs] == ["first", "Hi from the brain", "second", "Partial"]
+        history = c.get("/v1/threads/p").json()["history"]
+        assert [m["content"] for m in history] == ["first", "Hi from the brain", "second", "Partial"]
 
 
 def test_thread_history_exposes_interruption_state(tmp_path):

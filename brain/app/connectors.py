@@ -50,6 +50,17 @@ DEFAULT_CONFIG = {
 DEFAULT_NOTES_DB = REPO_ROOT / "brain" / "data" / "notes.sqlite"
 
 
+def default_config() -> dict:
+    """The built-in connector, when its script ships with this deployment.
+
+    A hosted bundle contains only brain/, so the notes server is absent there;
+    leaving it out beats reporting a failed connector on every start.
+    """
+    if BUILTIN_SERVERS["notes"].exists():
+        return DEFAULT_CONFIG
+    return {"mcpServers": {}}
+
+
 class ConfigError(Exception):
     pass
 
@@ -161,7 +172,7 @@ def load_specs(path: Path | None, env: dict[str, str]) -> tuple[list[ConnectorSp
     if path is None:
         return [], []
     try:
-        config = json.loads(path.read_text()) if path.exists() else DEFAULT_CONFIG
+        config = json.loads(path.read_text()) if path.exists() else default_config()
         servers = config.get("mcpServers", {})
     except (json.JSONDecodeError, AttributeError) as exc:
         return [], [ConnectorStatus(str(path.name), False, error=f"invalid JSON: {exc}")]
