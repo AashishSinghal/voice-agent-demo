@@ -72,16 +72,58 @@ async def test_usage_event_reports_tier_and_cost():
     assert usage.tier == "mid" and usage.usd > 0 and usage.prompt_tokens > 0
 
 
-async def test_provider_failure_surfaces_as_error_event():
-    class Boom(ScriptedChatModel):
-        def _generate(self, *a, **k):
-            raise RuntimeError("provider down")
+class Boom(ScriptedChatModel):
+    def _generate(self, *a, **k):
+        raise RuntimeError("provider down")
 
-        def _stream(self, *a, **k):
-            raise RuntimeError("provider down")
+    def _stream(self, *a, **k):
+        raise RuntimeError("provider down")
+
+
+async def test_a_provider_failure_degrades_instead_of_ending_the_turn():
+    """With nothing else to fall back to, the caller still gets a spoken answer."""
+    from app.graph import UNAVAILABLE_TEXT
 
     events = await collect(build_graph(settings(), MemorySaver(), Boom(script=[])))
-    assert isinstance(events[-1], Error) and "provider down" in events[-1].message
+    done = next(e for e in events if isinstance(e, Done))
+    assert done.degraded and done.text == UNAVAILABLE_TEXT
+    assert not any(isinstance(e, Error) for e in events)
+
+
+async def test_a_failing_tier_steps_down_to_the_next_one():
+    frontier = tier_for("frontier", "fake", "openai/gpt-oss-120b")
+    mid = tier_for("mid", "fake", "openai/gpt-oss-20b")
+    models = {"frontier": Boom(script=[]), "mid": ScriptedChatModel(script=[AIMessage(content="From mid.")])}
+    s = settings(tiers=[frontier, mid])
+    events = await collect(build_graph(s, MemorySaver(), models))
+
+    done = next(e for e in events if isinstance(e, Done))
+    assert done.text == "From mid." and done.degraded
+    usage = next(e for e in events if isinstance(e, Usage))
+    assert usage.tier == "mid" and usage.degraded_from == "frontier"
+
+
+async def test_a_healthy_preferred_tier_is_not_reported_as_degraded():
+    frontier = tier_for("frontier", "fake", "openai/gpt-oss-120b")
+    mid = tier_for("mid", "fake", "openai/gpt-oss-20b")
+    models = {
+        "frontier": ScriptedChatModel(script=[AIMessage(content="From frontier.")]),
+        "mid": Boom(script=[]),
+    }
+    events = await collect(build_graph(settings(tiers=[frontier, mid]), MemorySaver(), models))
+    done = next(e for e in events if isinstance(e, Done))
+    assert done.text == "From frontier." and not done.degraded
+
+
+async def test_every_tier_failing_is_not_blamed_on_the_budget():
+    from app.graph import OVER_BUDGET_TEXT, UNAVAILABLE_TEXT
+
+    frontier = tier_for("frontier", "fake", "openai/gpt-oss-120b")
+    mid = tier_for("mid", "fake", "openai/gpt-oss-20b")
+    models = {"frontier": Boom(script=[]), "mid": Boom(script=[])}
+    events = await collect(build_graph(settings(tiers=[frontier, mid]), MemorySaver(), models))
+    done = next(e for e in events if isinstance(e, Done))
+    assert done.text == UNAVAILABLE_TEXT and done.text != OVER_BUDGET_TEXT
 
 
 async def test_thread_survives_a_restart(tmp_path):

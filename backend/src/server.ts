@@ -590,6 +590,7 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('call:start', async () => {
     console.log(`📞 Call started: ${socket.id}`);
+    if (llm.activeProvider() === 'brain') brain.warmUp();
     session.conversation.reset();
     session.turnId += 1;
     session.resumeHint = null;
