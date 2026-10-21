@@ -11,6 +11,7 @@ import * as audioProcessor from './services/audioProcessor.js';
 import * as whisperService from './services/whisperService.js';
 import * as tts from './services/ttsService.js';
 import * as llm from './services/llmService.js';
+import * as brain from './services/brainClient.js';
 import { SentenceChunker } from './services/sentenceChunker.js';
 import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
 import { Conversation } from './services/conversation.js';
@@ -339,7 +340,8 @@ io.on('connection', (socket: Socket) => {
       resumeHint,
       (info) => {
         finish.info = info;
-      }
+      },
+      socket.id
     )) {
       if (signal.aborted) return;
 
@@ -520,6 +522,7 @@ io.on('connection', (socket: Socket) => {
     if (session.conversation.hasPending()) {
       const salvaged = session.conversation.commitPendingAsInterrupted();
       note('salvaged in-flight turn', { chars: salvaged.length });
+      if (llm.activeProvider() === 'brain') brain.reportHeard(socket.id, salvaged, null);
     }
     session.pendingText = null;
     session.pendingTurnId = null;
@@ -786,6 +789,10 @@ io.on('connection', (socket: Socket) => {
         // caller actually heard.
         abortActiveTurn('confirmed interruption');
         const spoken = session.conversation.commitInterrupted(interruptedTurnId, spokenChunks);
+        // The brain keeps its own history; tell it what was actually heard.
+        if (llm.activeProvider() === 'brain') {
+          brain.reportHeard(socket.id, spoken, session.conversation.lastUnspoken());
+        }
         session.pendingText = null;
         session.pendingTurnId = null;
 

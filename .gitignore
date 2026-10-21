@@ -87,3 +87,11 @@ lerna-debug.log*
 # Recordings are someone's voice and grow without bound; the labels are small
 # and still drive the text-level scoring on their own.
 eval/corpus/**/*.webm
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+brain/data/
+.claude/
