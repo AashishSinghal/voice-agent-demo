@@ -268,8 +268,10 @@ classification and the per-stage timings for every turn. Audio plus that log is
 a labelled row: input audio, what was heard, what the agent decided, how long
 it took.
 
-It is off by default, stays in the browser, and is never uploaded — recording
-someone's voice on a public URL is something they opt into.
+It is on by default, stays in the browser, and is never uploaded: the audio is
+held in memory and saved only if the visitor clicks download. Because it is a
+voice on a public URL, each call opens with a notice that says so, with a button
+to turn it off and delete what was captured. The choice is remembered.
 
 An importer turns a downloaded bundle into a corpus entry:
 

@@ -367,9 +367,9 @@ const DebugPanel = ({
           </label>
 
           <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
-            Off by default. The audio stays in this browser and is never
-            uploaded — it is saved only when you click below. Takes effect on
-            the next call.
+            On by default. The audio stays in this browser and is never
+            uploaded — it is saved only when you click below. Untick to turn it
+            off; that choice is remembered. Takes effect on the next call.
           </p>
 
           {conversationRecording && (

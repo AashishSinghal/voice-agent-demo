@@ -15,6 +15,7 @@ import Changelog from '../Changelog';
 import { toast } from 'sonner';
 import { diag } from '../../lib/diagnostics';
 import { shouldBargeOnArrival } from '../../lib/interruptionRules';
+import { readRecordPreference, writeRecordPreference } from '../../lib/preferences';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
 
@@ -103,11 +104,17 @@ const VoiceAgent = () => {
   const [changelogOpen, setChangelogOpen] = useState(false);
 
   /**
-   * Off by default and never uploaded. This runs on a public URL, so recording
-   * a visitor's voice is something they opt into, not something that happens
-   * because the audio would be useful to us.
+   * On by default, and never uploaded: the audio lives in this browser's memory
+   * and is saved only if the visitor clicks download. Because it is a voice on a
+   * public URL, every call says so up front (see the notice in handleStart) and
+   * the visitor can turn it off there or in the debug panel; that choice is
+   * remembered for later visits.
    */
-  const [recordCall, setRecordCall] = useState(false);
+  const [recordCall, setRecordCallState] = useState(readRecordPreference);
+  const setRecordCall = useCallback((enabled: boolean) => {
+    setRecordCallState(enabled);
+    writeRecordPreference(enabled);
+  }, []);
   const conversationRecorder = useConversationRecorder();
 
   const {
@@ -455,12 +462,31 @@ const VoiceAgent = () => {
       // Build the playback graph now so the agent's track exists from the
       // first word rather than from the first chunk played.
       playback.ensureGraph();
-      conversationRecorder.start(micStream, playback.outputTapRef.current?.stream ?? null);
+      const started = conversationRecorder.start(micStream, playback.outputTapRef.current?.stream ?? null);
+
+      // Say so at the moment it begins, and only if it really did. It fades on
+      // its own, but the choice to stop is one tap away while it is up.
+      if (started) {
+        toast('This call is being recorded', {
+          id: 'recording-notice',
+          description:
+            'Your voice and the agent’s are kept in this browser only. Nothing is uploaded, and you decide whether to download it.',
+          duration: 10_000,
+          action: {
+            label: 'Turn off',
+            onClick: () => {
+              conversationRecorder.discard();
+              setRecordCall(false);
+              toast('Recording stopped and deleted', { id: 'recording-notice', duration: 3000 });
+            },
+          },
+        });
+      }
     }
 
     setIsCallActive(true);
     startCall();
-  }, [acquire, startCall, recordCall, conversationRecorder, playback]);
+  }, [acquire, startCall, recordCall, setRecordCall, conversationRecorder, playback]);
 
   const handleEnd = useCallback(() => {
     recorder.discardRecording();
