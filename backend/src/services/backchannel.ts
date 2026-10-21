@@ -25,9 +25,36 @@ const BACKCHANNEL_PHRASES = new Set([
 ]);
 
 /** Phrases that mean "resume what you were saying", not "new request". */
-const RESUME_PHRASES = new Set(['go on', 'continue', 'carry on', 'keep going', 'sorry go on']);
+const RESUME_PHRASES = new Set([
+  'go on', 'continue', 'carry on', 'keep going', 'sorry go on',
+  "don't stop", 'dont stop', 'do not stop', 'dont stop talking', "don't stop talking",
+]);
+
+/**
+ * "Be quiet", as opposed to "tell me something else".
+ *
+ * Without this, "stop" is just another interruption: the agent stops talking
+ * and then, because every interruption starts a new turn, answers the word
+ * "stop" with a fresh paragraph. A halt ends the turn and says nothing.
+ */
+const HALT_PHRASES = new Set([
+  'stop', 'stop it', 'stop talking', 'stop please', 'please stop', 'ok stop', 'okay stop',
+  'stop stop', 'stop right there', 'enough', 'thats enough', "that's enough", 'okay enough',
+  'ok enough', 'be quiet', 'quiet', 'shut up', 'silence', 'pause', 'hold on', 'hold up',
+  'hang on', 'wait', 'wait a second', 'wait a minute', 'one second', 'one sec', 'just a second',
+]);
+
+/** "Don't stop" is the opposite of a halt. */
+const NEGATED_STOP = /\b(don'?t|do not|never)\b/;
 
 const MAX_BACKCHANNEL_WORDS = 3;
+const MAX_HALT_WORDS = 5;
+
+/** Words that may surround "stop" without changing what it means. */
+const HALT_FILLER = new Set([
+  'please', 'ok', 'okay', 'it', 'talking', 'right', 'there', 'now', 'just', 'can', 'could',
+  'would', 'you', 'yeah', 'yes', 'no', 'oh', 'hey', 'sorry', 'for', 'a', 'second', 'that', 'this',
+]);
 
 function normalise(text: string): string {
   return text
@@ -66,7 +93,7 @@ export function looksHallucinated(text: string, spokenMs: number): boolean {
 }
 
 export interface UtteranceClassification {
-  kind: 'backchannel' | 'resume' | 'interruption';
+  kind: 'backchannel' | 'resume' | 'halt' | 'interruption';
   normalised: string;
 }
 
@@ -83,6 +110,16 @@ export function classifyUtterance(text: string): UtteranceClassification {
   }
 
   const words = normalised.split(' ');
+
+  if (words.length <= MAX_HALT_WORDS) {
+    // "stop" counts only when nothing else of substance is said: "stop sign"
+    // and "bus stop" are not commands.
+    const stopWord =
+      words.includes('stop') && words.every((w) => w === 'stop' || HALT_FILLER.has(w));
+    if (stopWord && NEGATED_STOP.test(normalised)) return { kind: 'resume', normalised };
+    if (HALT_PHRASES.has(normalised) || stopWord) return { kind: 'halt', normalised };
+  }
+
   if (words.length <= MAX_BACKCHANNEL_WORDS && BACKCHANNEL_PHRASES.has(normalised)) {
     return { kind: 'backchannel', normalised };
   }

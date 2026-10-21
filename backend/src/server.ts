@@ -512,20 +512,46 @@ io.on('connection', (socket: Socket) => {
     }
   };
 
-  /** Run a caller utterance through generation, as a fresh turn. */
-  const handleUtterance = async (text: string, sttMs: number | null) => {
+  /**
+   * A new caller turn is replacing one that was still generating or playing.
+   *
+   * Aborting generation is not enough. Audio the server already sent is queued
+   * or playing in the browser, and the browser cannot know the turn is dead:
+   * the old answer used to play out in full, with the new transcript already on
+   * screen. So tell the client to drop it, and record only what was heard.
+   */
+  const supersedeInFlightTurn = (spokenChunks?: number) => {
+    const inFlight = session.controller !== null;
+    const hadPending = session.conversation.hasPending();
+    const oldTurnId = session.pendingTurnId ?? (inFlight || hadPending ? session.turnId : null);
+
     abortActiveTurn('new caller turn');
 
-    // If a turn was in flight and nobody committed it, record it now. Without
-    // this the assistant's half-finished answer vanishes from history, and the
-    // agent genuinely cannot recall a topic it had started explaining.
-    if (session.conversation.hasPending()) {
-      const salvaged = session.conversation.commitPendingAsInterrupted();
-      note('salvaged in-flight turn', { chars: salvaged.length });
-      if (llm.activeProvider() === 'brain') brain.reportHeard(socket.id, salvaged, null);
+    let spoken = '';
+    if (hadPending && oldTurnId !== null) {
+      // The client reports how many chunks had finished playing; without it
+      // assume everything emitted was heard, which is generous but never loses
+      // the topic.
+      spoken =
+        spokenChunks !== undefined
+          ? session.conversation.commitInterrupted(oldTurnId, spokenChunks)
+          : session.conversation.commitPendingAsInterrupted();
+      note('superseded in-flight turn', { turnId: oldTurnId, chars: spoken.length, spokenChunks });
+      if (llm.activeProvider() === 'brain') {
+        brain.reportHeard(socket.id, spoken, session.conversation.lastUnspoken());
+      }
+    }
+
+    if (oldTurnId !== null) {
+      socket.emit('turn:interrupted', { turnId: oldTurnId, spokenText: spoken });
     }
     session.pendingText = null;
     session.pendingTurnId = null;
+  };
+
+  /** Run a caller utterance through generation, as a fresh turn. */
+  const handleUtterance = async (text: string, sttMs: number | null, spokenChunks?: number) => {
+    supersedeInFlightTurn(spokenChunks);
 
     session.turnId += 1;
     const turnId = session.turnId;
@@ -705,14 +731,27 @@ io.on('connection', (socket: Socket) => {
             return;
           }
 
-          socket.emit('transcription:complete', { text: result.text });
+          const spoke = classifyUtterance(result.text);
+          socket.emit('transcription:complete', {
+            text: result.text,
+            ...(spoke.kind === 'halt' ? { kind: 'halt' } : {}),
+          });
+
+          if (spoke.kind === 'halt') {
+            // "Stop" said without the agent being paused by it, e.g. the caller
+            // spoke before audio had started. Silence what is coming and wait.
+            supersedeInFlightTurn(data.spokenChunks);
+            backToListening('caller said stop');
+            return;
+          }
+
           socket.emit('turn:timeline', {
             kind: 'turn',
             marks: timeline.snapshot(),
             total: timeline.total,
           });
 
-          await handleUtterance(result.text, result.ms);
+          await handleUtterance(result.text, result.ms, data.spokenChunks);
           return;
         }
 
@@ -805,6 +844,13 @@ io.on('connection', (socket: Socket) => {
           marks: timeline.snapshot(),
           total: timeline.total,
         });
+
+        if (classification.kind === 'halt') {
+          // The caller asked it to be quiet. The turn is over and nothing new
+          // starts: answering "stop" with another answer is exactly wrong.
+          backToListening('caller said stop');
+          return;
+        }
 
         if (classification.kind === 'resume') {
           session.resumeHint = session.conversation.lastUnspoken();
