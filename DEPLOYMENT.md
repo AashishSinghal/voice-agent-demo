@@ -168,6 +168,15 @@ sharing the link widely.
 - Free-tier rate limits are the real capacity ceiling, not the architecture.
 - No persistence: conversation state lives in memory per socket and dies with it.
 
+## Web analytics
+
+The frontend mounts `@vercel/analytics` (`frontend/src/main.tsx`). It is
+cookieless and records page views only: no audio, no transcripts, nothing from
+the call. The code does nothing until the feature is switched on for the project:
+Vercel dashboard > the frontend project > **Analytics** > **Enable**. After the
+next deploy, data appears in that tab (the script is served from
+`/_vercel/insights/script.js`). It stays quiet in local development.
+
 ## Hosting the brain (Vercel + Neon)
 
 The brain is a separate Python service (`LLM_PROVIDER=brain`). It does not fit on
