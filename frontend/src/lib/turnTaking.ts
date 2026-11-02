@@ -99,6 +99,13 @@ export interface TurnTakingState {
   recordingStartedAt: number;
   /** The current recording is over-speech rather than a normal turn. */
   barging: boolean;
+  /**
+   * Clips requested by `stopRecording` and not yet delivered. A clip that
+   * arrives with none owed (a discard that raced a stop, say) is dropped: it
+   * has no metadata, and sending it would put a nameless clip in front of the
+   * transcriber.
+   */
+  clipsOwed: number;
   /** Chunks the agent had fully spoken when the caller cut in. */
   spokenAtBarge: number;
   /**
@@ -116,6 +123,7 @@ export const initialState = (): TurnTakingState => ({
   speechStartedAt: 0,
   recordingStartedAt: 0,
   barging: false,
+  clipsOwed: 0,
   spokenAtBarge: 0,
   pendingSend: { duringPlayback: false, spokenChunks: 0, trimStartMs: 0, spokenMs: 0, clipMs: 0 },
 });
@@ -253,8 +261,9 @@ export function step(state: TurnTakingState, event: TurnTakingEvent): Step {
     case 'recordingReady':
       // A recorder flushing after the caller hung up must not start a new turn.
       if (!state.callActive) return { state, commands: [{ type: 'dropClip', reason: 'call ended' }] };
+      if (state.clipsOwed <= 0) return { state, commands: [{ type: 'dropClip', reason: 'not requested' }] };
       return {
-        state,
+        state: { ...state, clipsOwed: state.clipsOwed - 1 },
         commands: [
           { type: 'timeline', op: 'mark', label: 'audio sent' },
           { type: 'sendClip', send: state.pendingSend },
@@ -337,7 +346,10 @@ export function step(state: TurnTakingState, event: TurnTakingEvent): Step {
       // a visible round trip of dead air.
       if (!state.barging) commands.push({ type: 'setThinking', reason: 'optimistic (audio sent)' });
       commands.push({ type: 'stopRecording' });
-      return { state: { ...state, sawSpeech: false, pendingSend: send }, commands };
+      return {
+        state: { ...state, sawSpeech: false, pendingSend: send, clipsOwed: state.clipsOwed + 1 },
+        commands,
+      };
     }
 
     case 'audioChunk': {
@@ -379,7 +391,7 @@ export function step(state: TurnTakingState, event: TurnTakingEvent): Step {
         );
         const send = payload(state, event.now, spokenMs, event.chunksPlayed);
         return {
-          state: { ...state, sawSpeech: false, pendingSend: send },
+          state: { ...state, sawSpeech: false, pendingSend: send, clipsOwed: state.clipsOwed + 1 },
           commands: [
             trace('max turn length', 'force-sending recording'),
             { type: 'setUserSpeaking', value: false },
@@ -401,5 +413,10 @@ export function step(state: TurnTakingState, event: TurnTakingEvent): Step {
       // here matters: a pause with no matching resume would otherwise leave the
       // queue permanently blocked and every later turn silent.
       return { state, commands: [{ type: 'stopPlayback' }, { type: 'resetPlaybackCounter' }] };
+
+    default:
+      // An event this version does not know. Ignoring it keeps one unexpected
+      // message from taking the whole call down.
+      return { state, commands: [] };
   }
 }

@@ -164,7 +164,8 @@ export function replay(lines: LogLine[]): ReplayResult {
   const trail: ReplayResult['trail'] = [];
   const recordedSends: RecordedSend[] = [];
   const recordedBarges: RecordedBarge[] = [];
-  let nextTick = 1;
+  // The browser's watchdog ticks once a second from when recording began.
+  let nextTick: number | null = null;
 
   const feed = (t: number, event: TurnTakingEvent) => {
     const before = state;
@@ -178,7 +179,7 @@ export function replay(lines: LogLine[]): ReplayResult {
     const now = Math.round(line.t * 1000);
 
     // The watchdog ticks once a second in the browser; replay supplies the same.
-    while (nextTick <= line.t) {
+    while (nextTick !== null && nextTick <= line.t) {
       const level = world.lastLevel;
       const quiet = level ? level.rms < Math.max(level.floor * 1.8, 0.006) : true;
       feed(nextTick, { type: 'tick', now: nextTick * 1000, quiet, chunksPlayed: world.chunksPlayed });
@@ -216,14 +217,13 @@ export function replay(lines: LogLine[]): ReplayResult {
         break;
       case 'audio/recorder started':
         world.recording = true;
+        if (nextTick === null) nextTick = line.t + 1;
         feed(line.t, { type: 'recordingStarted', now });
         break;
       case 'audio/recording ready':
-        world.recording = false;
+        // The next recorder is already running by now: logs show it starting just
+        // before the old clip is reported, so recording stays true for the call.
         feed(line.t, { type: 'recordingReady' });
-        break;
-      case 'audio/recording discarded':
-        world.recording = false;
         break;
       case 'socket-in/response:audio:chunk': {
         const turnId = Number(line.data.turnId);
@@ -256,6 +256,7 @@ export function replay(lines: LogLine[]): ReplayResult {
         feed(line.t, { type: 'readyToListen' });
         break;
       case 'socket-out/call:end':
+        world.recording = false;
         feed(line.t, { type: 'callEnded' });
         break;
       case 'socket-out/audio:input': {
@@ -328,8 +329,9 @@ export function checkInvariants(result: ReplayResult): string[] {
       }
     }
 
-    // Nothing is sent after hanging up.
+    // Nothing is sent after hanging up, and only clips that were asked for.
     if (!before.callActive && has('sendClip')) problems.push(`${at}: sent a clip after the call ended`);
+    if (before.clipsOwed <= 0 && has('sendClip')) problems.push(`${at}: sent a clip nobody asked for`);
   }
 
   if (paused !== notified) problems.push(`pauses (${paused}) and barge notifications (${notified}) differ`);

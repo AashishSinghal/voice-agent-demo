@@ -225,3 +225,16 @@ test('the speech detector listens harder while the agent talks', () => {
   assert.equal(vadTuning('paused').silenceDurationMs, TIMING.ENDPOINT_OVER_SPEECH_MS);
   assert.equal(vadTuning('speaking').silenceDurationMs, TIMING.ENDPOINT_MS);
 });
+
+test('a clip nobody asked for is dropped, not sent with empty metadata', () => {
+  const { commands } = run([...inCall, { type: 'recordingReady' }]);
+  assert.deepEqual(of(commands, 'dropClip'), [{ type: 'dropClip', reason: 'not requested' }]);
+  assert.equal(of(commands, 'sendClip').length, 0);
+});
+
+test('an unknown event is ignored rather than breaking the call', () => {
+  const before = run(inCall).state;
+  const after = step(before, { type: 'somethingNew' } as never);
+  assert.deepEqual(after.state, before);
+  assert.deepEqual(after.commands, []);
+});
