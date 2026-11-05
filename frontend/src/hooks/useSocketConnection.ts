@@ -58,6 +58,8 @@ interface Handlers {
   /** Over-speech was a real interruption — drop queued audio. */
   onInterrupted: (spokenText: string) => void;
   onReadyToListen: () => void;
+  /** Sent once on connect: which LLM path the server is on. */
+  onServerInfo?: (info: { llmProvider: string }) => void;
   /** The call is over — the caller hung up, or the server ended it. */
   onCallEnded: () => void;
 }
@@ -258,6 +260,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     });
 
     socket.on('ready:listening', () => handlersRef.current.onReadyToListen());
+    socket.on('server:info', (info: { llmProvider: string }) => handlersRef.current.onServerInfo?.(info));
 
     socket.on('error', (d: { message: string }) => {
       console.error('[SOCKET]', d.message);

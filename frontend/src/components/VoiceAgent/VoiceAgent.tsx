@@ -66,7 +66,7 @@ const VoiceAgent = () => {
   const [recordCall, setRecordCall] = useState(true);
   /** Transcript under the orb. Off gives the orb the whole centre; lasts for this page load. */
   const [showTranscript, setShowTranscript] = useState(true);
-  /** Which LLM path the server is on ('brain', 'groq', 'ollama'), from its /health. */
+  /** Which LLM path the server is on ('brain', 'groq', 'ollama'), announced on connect. */
   const [llmProvider, setLlmProvider] = useState<string | null>(null);
   const conversationRecorder = useConversationRecorder();
 
@@ -143,6 +143,7 @@ const VoiceAgent = () => {
     onTurnComplete: (turnId) => playback.markTurnComplete(turnId),
     onResumePlayback: () => dispatch({ type: 'serverResume' }),
     onInterrupted: () => dispatch({ type: 'serverInterrupted' }),
+    onServerInfo: (info) => setLlmProvider(info.llmProvider),
     onCallEnded: () => {
       dispatch({ type: 'callEnded' });
       setIsCallActive(false);
@@ -372,17 +373,6 @@ const VoiceAgent = () => {
   }, [isCallActive, playback.isPlaying, playback, notifyPlaybackProgress]);
 
   useEffect(() => release, [release]);
-
-  // Read once per connection so the badge reflects the server actually in use.
-  useEffect(() => {
-    if (!connected) return;
-    const controller = new AbortController();
-    fetch(`${SERVER_URL}/health`, { signal: controller.signal })
-      .then((r) => r.json())
-      .then((h: { llmProvider?: string }) => setLlmProvider(h.llmProvider ?? null))
-      .catch(() => setLlmProvider(null));
-    return () => controller.abort();
-  }, [connected]);
 
   return (
     <div className="relative flex h-screen flex-col bg-zinc-950 text-zinc-100">

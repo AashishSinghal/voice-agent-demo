@@ -204,6 +204,12 @@ io.on('connection', (socket: Socket) => {
   let closed = false;
   const trace = traceFactory(socket.id);
 
+  // Tell the page which model path it is on. Sent over the socket rather than
+  // left for the page to fetch from /health: the socket is websocket-only and so
+  // never subject to CORS, whereas /health is, and a CLIENT_URL that does not
+  // match the page's domain (a trailing slash, or the old domain) silently hid it.
+  rawEmit('server:info', { llmProvider: llm.activeProvider() });
+
   // Everything this process prints, from here or from any service, goes to the
   // client so one exported file holds both halves of the conversation.
   // Scoped to this socket: the process is shared, and mirroring every line to

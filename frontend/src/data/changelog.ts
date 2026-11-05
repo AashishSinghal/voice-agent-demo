@@ -36,6 +36,16 @@ export interface ChangeEntry {
 export const CHANGELOG: ChangeEntry[] = [
   {
     date: '2026-11-05',
+    title: 'The brain indicator never showed on the live site',
+    kind: 'bug',
+    problem:
+      'The page was meant to show whether a call runs on the brain, but on the live domain the indicator never appeared, and nothing reported why.',
+    cause:
+      'The page fetched the server\'s /health to find out, and a browser only lets a page read that if the server\'s allowed origin matches the page. The server was set to the old domain with a trailing slash, so the fetch was blocked. Calls themselves worked, because the socket is websocket-only and never subject to that check.',
+    fix: 'The server now announces its LLM path over the socket the moment a call connects, so the indicator no longer depends on the allowed-origin setting.',
+  },
+  {
+    date: '2026-11-05',
     title: 'Short commands like "stop" and "yes" were ignored outright',
     kind: 'bug',
     problem:
