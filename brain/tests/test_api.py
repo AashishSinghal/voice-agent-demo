@@ -75,6 +75,19 @@ def test_heard_with_nothing_spoken_removes_the_reply(tmp_path):
         assert c.get("/v1/threads/h2").json()["messages"] == 1
 
 
+def test_heard_retry_with_the_same_report_id_is_applied_once(tmp_path):
+    """A timed-out report is retried. Removing a reply twice would also remove
+    the previous turn's answer."""
+    with TestClient(make(tmp_path)) as c:
+        c.post("/v1/turn", json={"session_id": "r", "text": "one"})
+        c.post("/v1/turn", json={"session_id": "r", "text": "two"})
+        first = c.post("/v1/threads/r/heard", json={"spoken": "", "report_id": "a"})
+        again = c.post("/v1/threads/r/heard", json={"spoken": "", "report_id": "a"})
+        assert first.json() == {"updated": True}
+        assert again.json() == {"updated": False, "duplicate": True}
+        assert c.get("/v1/threads/r").json()["messages"] == 3
+
+
 def test_heard_appends_when_the_reply_never_reached_the_checkpoint(tmp_path):
     """Interrupted before the graph saved its answer: the thread ends on the
     caller's message. The previous turn's answer must not be overwritten."""

@@ -21,6 +21,8 @@ class HeardRequest(BaseModel):
 
     spoken: str = Field(max_length=8000)
     unspoken: str | None = Field(default=None, max_length=8000)
+    # Names this report so a retry after a timeout cannot apply it twice.
+    report_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class Token(BaseModel):
