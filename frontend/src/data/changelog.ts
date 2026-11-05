@@ -36,6 +36,19 @@ export interface ChangeEntry {
 export const CHANGELOG: ChangeEntry[] = [
   {
     date: '2026-11-05',
+    title: 'Two thirds of every debug bundle was lines that repeated other lines',
+    kind: 'insight',
+    problem:
+      'A minute of call produced a log of about 1,200 lines, and reading it cost tokens in proportion to its length rather than to what it said.',
+    cause:
+      'One line per streamed token, logged by the server and again by the browser; every server event echoed by the browser\'s copy; the microphone level four times a second; and the detector re-reporting the end of speech each window through silence.',
+    fix: 'The exported text leaves those out and keeps speech boundaries, clip metadata, transcripts, state changes, timings, cost, errors and disconnects. A test replays the recorded calls with and without the trimmed lines and checks the module does the same thing.',
+    metrics: [
+      { label: 'Hosted call, 65 s', before: '1,171 lines, 97 KB', after: '329 lines, 34 KB' },
+    ],
+  },
+  {
+    date: '2026-11-05',
     title: 'The brain indicator never showed on the live site',
     kind: 'bug',
     problem:

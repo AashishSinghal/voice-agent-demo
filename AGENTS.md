@@ -182,6 +182,8 @@ Names only; see `backend/.env.example` for defaults and comments. Never commit
   ref to the component. `lib/replay.ts` feeds a diagnostics bundle through it:
   save a bad call with `node scripts/diag-to-fixture.ts <diagnostics.txt> <out.json>`
   (it strips transcripts, so the fixture is safe to commit) and it becomes a test.
+  The exported bundle leaves out lines that only repeat others
+  (`lib/compactDiagnostics.ts`); `diag.toText({ full: true })` keeps everything.
 - **Audio arriving into live speech is held.** The first chunk can land while the
   caller is mid-sentence (before speech is confirmed, or while the state reads
   "thinking"); it starts paused and is reported as a barge.
