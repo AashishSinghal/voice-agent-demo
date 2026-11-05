@@ -1,6 +1,7 @@
 /**
- * Decisions about interrupting the agent, kept free of React and the audio
- * graph so they can be tested without a browser or a speaker.
+ * Playback's own rule for when a new turn cuts off what is playing, kept free of
+ * React and the audio graph so it can be tested without a speaker. Who is
+ * speaking, and what to do about it, lives in turnTaking.ts.
  */
 
 /**
@@ -20,21 +21,4 @@ export function shouldReleaseCurrent(input: {
 }): boolean {
   if (input.paused || input.droppedQueued > 0) return true;
   return input.playingTurn !== null && input.playingTurn !== input.incomingTurn;
-}
-
-/**
- * Is the caller already talking as the agent's audio arrives?
- *
- * Speech detection needs a moment of sustained sound, and the agent's first
- * chunk can land in that gap, or in the "thinking" state where barge-in is not
- * armed. Playing it would have the agent start talking over someone mid
- * sentence, so audio that arrives into live speech is held and treated as an
- * interruption from its first frame.
- */
-export function shouldBargeOnArrival(input: {
-  callerSpeaking: boolean;
-  alreadyBarging: boolean;
-  callActive: boolean;
-}): boolean {
-  return input.callActive && input.callerSpeaking && !input.alreadyBarging;
 }

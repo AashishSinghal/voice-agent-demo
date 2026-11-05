@@ -1,3 +1,4 @@
+import { percentile } from '../lib/percentile';
 import { create } from 'zustand';
 import { diag } from '../lib/diagnostics';
 
@@ -55,7 +56,8 @@ interface BotStateStore {
   setSubstatus: (substatus: string | null) => void;
   logEvent: (label: string, detail?: string) => void;
 
-  startTimeline: (kind: TimelineKind) => void;
+  /** `backdateMs` moves the start earlier, e.g. to the moment the caller really fell silent. */
+  startTimeline: (kind: TimelineKind, backdateMs?: number) => void;
   markTimeline: (label: string) => void;
   attachServerMarks: (marks: { label: string; at: number; delta: number }[]) => void;
   finishTimeline: (label: string, actualKind?: TimelineKind) => void;
@@ -101,8 +103,8 @@ export const useBotStateStore = create<BotStateStore>((set, get) => ({
       ],
     })),
 
-  startTimeline: (kind) => {
-    timelineStart = performance.now();
+  startTimeline: (kind, backdateMs = 0) => {
+    timelineStart = performance.now() - backdateMs;
     timelineLast = timelineStart;
     set({ timeline: [], timelineKind: kind });
   },
@@ -145,7 +147,7 @@ export const useBotStateStore = create<BotStateStore>((set, get) => ({
         timelineKind: null,
         benchmarks: {
           ...s.benchmarks,
-          [kind]: { samples: [...bench.samples, total].slice(-20), last: total },
+          [kind]: { samples: [...bench.samples, total].slice(-50), last: total },
         },
       };
     });
@@ -165,11 +167,8 @@ export const useBotStateStore = create<BotStateStore>((set, get) => ({
     }),
 }));
 
-export const median = (values: number[]): number | null => {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  return Math.round(sorted[Math.floor(sorted.length / 2)]);
-};
+export const median = (values: number[]): number | null => percentile(values, 0.5);
+export { percentile };
 
 // Dev affordance: drive call state from the console to check visuals without
 // a live call, e.g. __botStore.getState().setState('speaking')

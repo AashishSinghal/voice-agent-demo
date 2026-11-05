@@ -7,6 +7,8 @@ interface OrbProps {
   inputAnalyserRef: React.RefObject<AnalyserNode | null>;
   /** Spectrum of the agent's voice as it plays. */
   outputAnalyserRef: React.RefObject<AnalyserNode | null>;
+  /** Fill the screen's centre instead of sitting above the transcript. */
+  large?: boolean;
 }
 
 interface Palette {
@@ -25,6 +27,8 @@ const PALETTE: Record<CallState, Palette> = {
 };
 
 const SIZE = 260;
+/** Largest the orb gets when it has the screen to itself. */
+const LARGE_MAX = 480;
 const BASE_RADIUS = 74;
 /** Points around the ring. Enough to read as a curve, few enough to stay smooth. */
 const POINTS = 128;
@@ -46,7 +50,7 @@ const lerp = (from: number, to: number, t: number) => from + (to - from) * t;
  * than snap, and everything is drawn on a canvas because this runs at 60fps
  * and has no business touching React state.
  */
-const Orb = ({ state, inputAnalyserRef, outputAnalyserRef }: OrbProps) => {
+const Orb = ({ state, inputAnalyserRef, outputAnalyserRef, large = false }: OrbProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const radiiRef = useRef<number[]>(new Array(POINTS).fill(BASE_RADIUS));
   const paletteRef = useRef<Palette>(PALETTE.idle);
@@ -62,9 +66,12 @@ const Orb = ({ state, inputAnalyserRef, outputAnalyserRef }: OrbProps) => {
     if (!context) return;
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = SIZE * dpr;
-    canvas.height = SIZE * dpr;
-    context.scale(dpr, dpr);
+    // Drawing stays in a SIZE-by-SIZE space; the pixel buffer is scaled up when
+    // the orb is shown large so it stays sharp rather than being stretched.
+    const zoom = large ? LARGE_MAX / SIZE : 1;
+    canvas.width = SIZE * dpr * zoom;
+    canvas.height = SIZE * dpr * zoom;
+    context.scale(dpr * zoom, dpr * zoom);
 
     const centre = SIZE / 2;
     let frame = 0;
@@ -171,12 +178,19 @@ const Orb = ({ state, inputAnalyserRef, outputAnalyserRef }: OrbProps) => {
 
     frame = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(frame);
-  }, [inputAnalyserRef, outputAnalyserRef]);
+  }, [inputAnalyserRef, outputAnalyserRef, large]);
 
   return (
     <canvas
       ref={canvasRef}
-      style={{ width: SIZE, height: SIZE }}
+      // Large: as big as the screen allows, never wider than the viewport or
+      // taller than about half of it, so a phone in portrait still fits the
+      // caption and the call button.
+      style={
+        large
+          ? { width: `min(80vw, 50vh, ${LARGE_MAX}px)`, aspectRatio: '1 / 1' }
+          : { width: SIZE, height: SIZE }
+      }
       aria-hidden
     />
   );
