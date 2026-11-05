@@ -64,6 +64,13 @@ interface Handlers {
   onCallEnded: () => void;
 }
 
+/**
+ * One random id per page load, resent on every reconnect. The server files the
+ * conversation under it, so a dropped connection no longer wipes the agent's
+ * memory of the call. Not a secret and not a login: it only names a thread.
+ */
+const SESSION_ID = crypto.randomUUID();
+
 export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
   const socketRef = useRef<Socket | null>(null);
   const [connected, setConnected] = useState(false);
@@ -145,7 +152,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
       reconnectionAttempts: 5,
       // Only sent when the backend sets ACCESS_TOKEN. Baked into the public
       // bundle, so it deters casual use rather than keeping a secret.
-      auth: { token: import.meta.env.VITE_ACCESS_TOKEN ?? '' },
+      auth: { token: import.meta.env.VITE_ACCESS_TOKEN ?? '', sessionId: SESSION_ID },
     });
     socketRef.current = socket;
 

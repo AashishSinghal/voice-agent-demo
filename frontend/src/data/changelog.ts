@@ -36,6 +36,16 @@ export interface ChangeEntry {
 export const CHANGELOG: ChangeEntry[] = [
   {
     date: '2026-11-05',
+    title: 'A dropped connection made the agent forget the whole call',
+    kind: 'bug',
+    problem:
+      'Mid-call the connection dropped for two seconds. The call carried on, but the agent no longer knew anything said before the drop.',
+    cause:
+      'The brain filed the conversation under the socket\'s id, and a reconnect is a new socket with a new id, so the next turn opened an empty thread.',
+    fix: 'The page makes one random id per page load and sends it again on every reconnect. The server files the conversation under it, with a prefix so it can never equal a real socket id, and falls back to the socket id for anything that is not a UUID. The cause of the drop itself is still unknown.',
+  },
+  {
+    date: '2026-11-05',
     title: 'Two thirds of every debug bundle was lines that repeated other lines',
     kind: 'insight',
     problem:

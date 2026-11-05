@@ -31,6 +31,7 @@ import {
 } from './services/limits.js';
 import {
   DEFAULT_MAX_AUDIO_BYTES,
+  conversationKey,
   validateAudioInput,
   validateBarge,
   validatePlayback,
@@ -203,6 +204,8 @@ io.on('connection', (socket: Socket) => {
   /** Set on disconnect so work that outlives the socket can stand down. */
   let closed = false;
   const trace = traceFactory(socket.id);
+  /** What the brain files this call's history under; survives a reconnect. */
+  const threadId = conversationKey(socket.handshake.auth?.sessionId, socket.id);
 
   // Tell the page which model path it is on. Sent over the socket rather than
   // left for the page to fetch from /health: the socket is websocket-only and so
@@ -349,7 +352,7 @@ io.on('connection', (socket: Socket) => {
       (info) => {
         finish.info = info;
       },
-      socket.id
+      threadId
     )) {
       if (signal.aborted) return;
 
@@ -555,7 +558,7 @@ io.on('connection', (socket: Socket) => {
           : session.conversation.commitPendingAsInterrupted();
       note('superseded in-flight turn', { turnId: oldTurnId, chars: spoken.length, spokenChunks });
       if (llm.activeProvider() === 'brain') {
-        brain.reportHeard(socket.id, spoken, session.conversation.lastUnspoken());
+        brain.reportHeard(threadId, spoken, session.conversation.lastUnspoken());
       }
     }
 
@@ -848,7 +851,7 @@ io.on('connection', (socket: Socket) => {
         const spoken = session.conversation.commitInterrupted(interruptedTurnId, spokenChunks);
         // The brain keeps its own history; tell it what was actually heard.
         if (llm.activeProvider() === 'brain') {
-          brain.reportHeard(socket.id, spoken, session.conversation.lastUnspoken());
+          brain.reportHeard(threadId, spoken, session.conversation.lastUnspoken());
         }
         session.pendingText = null;
         session.pendingTurnId = null;

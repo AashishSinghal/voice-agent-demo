@@ -65,6 +65,23 @@ function optionalNumber(
   return { ok: true, value: clamp(raw, min, max) };
 }
 
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The id the brain keeps a conversation under.
+ *
+ * A browser sends a random id per page load and resends it when its socket
+ * reconnects, so the conversation outlives a dropped connection instead of
+ * starting over with the new socket's id. The id is namespaced here so it can
+ * never equal a real socket id, which would let a caller pick up someone else's
+ * thread. Anything that is not a UUID falls back to the socket id.
+ */
+export function conversationKey(sessionId: unknown, socketId: string): string {
+  return typeof sessionId === 'string' && SESSION_ID.test(sessionId)
+    ? `sess-${sessionId.toLowerCase()}`
+    : socketId;
+}
+
 /** Accept a Buffer or ArrayBuffer only. Typed-array views and strings are refused. */
 export function toAudioBuffer(value: unknown, maxBytes: number): Validated<Buffer> {
   let buffer: Buffer;
