@@ -143,7 +143,11 @@ const VoiceAgent = () => {
     onTurnComplete: (turnId) => playback.markTurnComplete(turnId),
     onResumePlayback: () => dispatch({ type: 'serverResume' }),
     onInterrupted: () => dispatch({ type: 'serverInterrupted' }),
-    onServerInfo: (info) => setLlmProvider(info.llmProvider),
+    onServerInfo: (info) => {
+      setLlmProvider(info.llmProvider);
+      // The bundle otherwise never says which LLM path answered the call.
+      diag.log('client', 'server info', { llmProvider: info.llmProvider });
+    },
     onCallEnded: () => {
       dispatch({ type: 'callEnded' });
       setIsCallActive(false);
