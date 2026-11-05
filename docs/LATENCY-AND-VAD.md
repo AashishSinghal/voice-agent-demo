@@ -85,3 +85,6 @@ playing) under 800 ms at P50 and under 1.5 s at P95.
 | Date | Change | P50 | P95 | Notes |
 |---|---|---|---|---|
 | 2026-11-05 | baseline, local, `say` voice | ~3.6 s | n/a | n=4 ordinary turns across two calls: 3678, 3530, 4016, 3617 ms; 900 ms of it is the endpoint wait |
+| 2026-11-05 | brain on, local, Neon Ohio (from India), `say` voice | 4.6-7.4 s (n=2) | n/a | server first token 1.5-4.3 s vs ~0.5 s gateway-only. Direct to brain: `context` event at ~1.05 s, first token 1.4-2.1 s, `done` +1.1 s. Each Neon query ~270 ms from this machine |
+| 2026-11-05 | brain on Vercel (iad1) + Neon Ohio, timed directly from India, no gateway or voice | n/a | n/a | first token 0.79-1.0 s on turns 2-5 (2.25 s cold first turn) vs 1.4-2.1 s for the local brain; `context` event 0.5-1.0 s. n=5, includes the India-to-Virginia network leg |
+

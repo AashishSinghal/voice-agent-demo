@@ -66,6 +66,8 @@ const VoiceAgent = () => {
   const [recordCall, setRecordCall] = useState(true);
   /** Transcript under the orb. Off gives the orb the whole centre; lasts for this page load. */
   const [showTranscript, setShowTranscript] = useState(true);
+  /** Which LLM path the server is on ('brain', 'groq', 'ollama'), from its /health. */
+  const [llmProvider, setLlmProvider] = useState<string | null>(null);
   const conversationRecorder = useConversationRecorder();
 
   const {
@@ -371,6 +373,17 @@ const VoiceAgent = () => {
 
   useEffect(() => release, [release]);
 
+  // Read once per connection so the badge reflects the server actually in use.
+  useEffect(() => {
+    if (!connected) return;
+    const controller = new AbortController();
+    fetch(`${SERVER_URL}/health`, { signal: controller.signal })
+      .then((r) => r.json())
+      .then((h: { llmProvider?: string }) => setLlmProvider(h.llmProvider ?? null))
+      .catch(() => setLlmProvider(null));
+    return () => controller.abort();
+  }, [connected]);
+
   return (
     <div className="relative flex h-screen flex-col bg-zinc-950 text-zinc-100">
       {/* Three columns so the title stays optically centred whatever the
@@ -390,8 +403,22 @@ const VoiceAgent = () => {
           <span className="text-sm font-medium tracking-tight text-zinc-300">Voice Agent</span>
           <span
             className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`}
-            title={connected ? 'Connected' : 'Disconnected'}
+            title={
+              connected
+                ? 'Green: connected to the voice server'
+                : 'Red: not connected to the voice server'
+            }
           />
+          {llmProvider && (
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${llmProvider === 'brain' ? 'bg-violet-400' : 'bg-amber-400'}`}
+              title={
+                llmProvider === 'brain'
+                  ? 'Violet: running on the brain (LangGraph service with tools, memory and approvals)'
+                  : `Amber: gateway only, calling the ${llmProvider} model directly (no brain)`
+              }
+            />
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-1">
