@@ -56,7 +56,7 @@ test('sanitising keeps timings and numbers but never what anyone said', () => {
 });
 
 test('committed fixtures contain nothing but event names and numbers', () => {
-  for (const name of fs.readdirSync(new URL('./fixtures/', import.meta.url))) {
+  for (const name of fs.readdirSync(new URL('./fixtures/', import.meta.url)).filter((n) => n.endsWith('.json'))) {
     const { lines } = fixture(name);
     for (const line of lines) {
       for (const [key, value] of Object.entries(line.data)) {

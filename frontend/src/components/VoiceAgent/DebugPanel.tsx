@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, Copy, Download, X } from 'lucide-react';
-import { useBotStateStore, median, type TimelineKind } from '../../stores/useBotStateStore';
+import { useBotStateStore, median, percentile, type TimelineKind } from '../../stores/useBotStateStore';
 import type { VadCalibration } from '../../hooks/useVoiceActivityDetection';
 import { diag } from '../../lib/diagnostics';
 import { createZip } from '../../lib/zip';
@@ -23,6 +23,8 @@ interface DebugPanelProps {
   recordCall: boolean;
   onToggleRecordCall: (enabled: boolean) => void;
   conversationRecording: ConversationRecording | null;
+  /** Audio so far, for an export taken while the call is still live. */
+  snapshotRecording: () => ConversationRecording | null;
   isRecordingCall: boolean;
 }
 
@@ -205,6 +207,7 @@ const DebugPanel = ({
   recordCall,
   onToggleRecordCall,
   conversationRecording,
+  snapshotRecording,
   isRecordingCall,
 }: DebugPanelProps) => {
   const { state, events, timeline, benchmarks } = useBotStateStore();
@@ -255,7 +258,7 @@ const DebugPanel = ({
               onClick={async () => {
                 setBundling(true);
                 try {
-                  const bundle = await buildBundle(conversationRecording);
+                  const bundle = await buildBundle(conversationRecording ?? snapshotRecording());
                   saveBlob(
                     bundle,
                     `voice-agent-${conversationRecording?.startedAt ?? Date.now()}.zip`
@@ -284,7 +287,7 @@ const DebugPanel = ({
             {entryCount} events captured — client, server, socket traffic and
             microphone level, in one timeline. The bundle is a zip holding that
             log
-            {conversationRecording
+            {conversationRecording || isRecording
               ? ', both audio tracks and a manifest.'
               : '. Enable recording below to include audio.'}
           </p>
@@ -440,16 +443,22 @@ const DebugPanel = ({
           <h3 className="mb-1 text-[11px] uppercase tracking-wider text-zinc-600">
             Reaction benchmark
           </h3>
-          {(['interruption', 'backchannel'] as TimelineKind[]).map((kind) => {
+          {(['turn', 'interruption', 'backchannel'] as TimelineKind[]).map((kind) => {
             const bench = benchmarks[kind];
             return (
               <Row
                 key={kind}
-                label={kind === 'interruption' ? 'stop on interrupt' : 'resume after "mhm"'}
+                label={
+                  kind === 'turn'
+                    ? 'reply (stop talking → hear it)'
+                    : kind === 'interruption'
+                      ? 'stop on interrupt'
+                      : 'resume after "mhm"'
+                }
                 value={
                   bench.last === null
                     ? '—'
-                    : `${bench.last} ms · med ${median(bench.samples)} (n=${bench.samples.length})`
+                    : `${bench.last} ms · P50 ${median(bench.samples)} · P95 ${percentile(bench.samples, 0.95)} (n=${bench.samples.length})`
                 }
               />
             );

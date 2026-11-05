@@ -1,0 +1,79 @@
+[
+  {
+    "file": "real/paris-question.wav",
+    "during": "idle",
+    "expect": "send",
+    "note": "an ordinary question, heard as 'What's the weather like in Paris?'",
+    "raw": true
+  },
+  {
+    "file": "real/stop-whats-india.wav",
+    "during": "agent",
+    "expect": "send",
+    "note": "'stop, what's the weather like in India' over the agent",
+    "raw": true,
+    "duringPlayback": true
+  },
+  {
+    "file": "real/yes-over-agent.wav",
+    "during": "agent",
+    "expect": "send",
+    "note": "'Yes.' over the agent; the server called it a backchannel",
+    "raw": true,
+    "duringPlayback": true
+  },
+  {
+    "file": "real/now-tell-me-storms.wav",
+    "during": "agent",
+    "expect": "send",
+    "note": "a full interruption",
+    "raw": true,
+    "duringPlayback": true
+  },
+  {
+    "file": "real/oh-over-agent.wav",
+    "during": "agent",
+    "expect": "send",
+    "note": "'Oh.' (237 ms audible) over the agent",
+    "raw": true,
+    "duringPlayback": true
+  },
+  {
+    "file": "real/i-mean-storms.wav",
+    "during": "agent",
+    "expect": "send",
+    "note": "start of a sentence said over the agent",
+    "raw": true,
+    "duringPlayback": true
+  },
+  {
+    "file": "real/inside-india.wav",
+    "during": "agent",
+    "expect": "send",
+    "note": "rest of the same sentence, sent as a second clip",
+    "raw": true,
+    "duringPlayback": true
+  },
+  {
+    "file": "real/no-answer.wav",
+    "during": "idle",
+    "expect": "send",
+    "note": "'No.' to an idle agent",
+    "raw": true
+  },
+  {
+    "file": "real/cough.wav",
+    "during": "agent",
+    "expect": "drop",
+    "note": "a real cough; Whisper wrote 'cough cough cough'",
+    "raw": true,
+    "known": "a real cough is as loud and as long as speech; an energy gate cannot tell (LATENCY-AND-VAD step 3)"
+  },
+  {
+    "file": "real/idle-72s.wav",
+    "during": "idle",
+    "expect": "drop",
+    "note": "a 384 ms noise burst; Whisper wrote '.'",
+    "raw": true
+  }
+]

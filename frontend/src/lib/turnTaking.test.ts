@@ -39,14 +39,30 @@ test('a normal turn is sent as a turn, and the screen goes to thinking at once',
   const { commands } = run([...inCall, start(2000, 'listening'), end(5000, 'listening'), { type: 'recordingReady' }]);
   const send = of(commands, 'sendClip')[0].send;
   assert.equal(send.duringPlayback, false);
-  assert.equal(send.spokenMs, 5000 - TIMING.ENDPOINT_MS - 2000);
+  assert.equal(send.spokenMs, 5000 - TIMING.ENDPOINT_MS - 2000 + TIMING.SPEECH_ONSET_MS);
   assert.equal(send.trimStartMs, Math.max(0, 2000 - 1000 - TIMING.PREROLL_MS));
   assert.ok(of(commands, 'setThinking').length === 1, 'optimistic thinking');
   assert.equal(of(commands, 'notifyBarge').length, 0);
 });
 
+test('a normal turn starts the latency clock at the moment the caller fell silent', () => {
+  const { commands } = run([...inCall, start(2000, 'listening'), end(5000, 'listening')]);
+  assert.deepEqual(of(commands, 'timeline').filter((c) => c.op === 'start'), [
+    { type: 'timeline', op: 'start', kind: 'turn', backdateMs: TIMING.ENDPOINT_MS },
+  ]);
+});
+
+test('an interruption is not timed as a turn', () => {
+  const { commands } = run([
+    ...inCall,
+    start(4000, 'speaking', { latestTurn: 3 }),
+    end(6000, 'paused'),
+  ]);
+  assert.equal(of(commands, 'timeline').filter((c) => c.op === 'start' && c.kind === 'turn').length, 0);
+});
+
 test('a brief burst is discarded rather than transcribed', () => {
-  const { commands } = run([...inCall, start(2000, 'listening'), end(2000 + TIMING.ENDPOINT_MS + 100, 'listening')]);
+  const { commands } = run([...inCall, start(2000, 'listening'), end(2000 + TIMING.ENDPOINT_MS + 10, 'listening')]);
   assert.equal(of(commands, 'discardRecording').length, 1);
   assert.equal(of(commands, 'stopRecording').length, 0);
 });
@@ -107,7 +123,7 @@ test('"stop" is long enough to count as an interruption', () => {
 
 test('the same word under the normal rules would have been dropped', () => {
   const confirmed = 5000;
-  const wordEnds = confirmed + (300 - TIMING.SPEECH_ONSET_MS); // only 50 ms audible after confirming
+  const wordEnds = confirmed + 20; // onset + 20 ms: 270 ms audible, under the 300 ms minimum
   const { commands } = run([
     ...inCall,
     start(confirmed, 'listening'),

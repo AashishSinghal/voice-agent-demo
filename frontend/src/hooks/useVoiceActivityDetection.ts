@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { diag } from '../lib/diagnostics';
+import { createVad, type VadCalibration } from '../lib/vad';
 
 interface UseVADOptions {
   /** Silence long enough to treat the caller's turn as finished. */
@@ -17,36 +18,16 @@ interface UseVADOptions {
 }
 
 /**
- * Microphone activity detection with an adaptive noise gate.
+ * Microphone activity detection: reads the level off a Web Audio analyser each
+ * frame and hands it to the pure detector in `lib/vad.ts`, which holds the
+ * thresholds and the start/end decisions.
  *
- * Level is time-domain RMS, not a mean over frequency bins — the bin average
+ * Level is time-domain RMS, not a mean over frequency bins: the bin average
  * is dominated by near-silent high bins and reads roughly the same whether you
  * are talking or not.
- *
- * Thresholds are derived from the room rather than hardcoded. Microphone gain
- * varies by an order of magnitude across machines: a level that is obviously
- * speech on one laptop is below the noise floor on another, and a fixed
- * threshold either ignores normal speech or triggers on the fan. The floor is
- * estimated as a low percentile of recent frames — speech is the minority of
- * samples in a window, so percentiles survive someone talking through the
- * calibration.
  */
 
-/** Absolute bounds, so a dead-silent room cannot drive thresholds to zero. */
-const MIN_SPEECH_RMS = 0.010;
-const MAX_SPEECH_RMS = 0.12;
-const MIN_SILENCE_RMS = 0.006;
-
-/** Frames kept for the floor estimate (~50ms apart → about 3 seconds). */
-const FLOOR_WINDOW = 60;
-const FLOOR_SAMPLE_MS = 50;
-const FLOOR_PERCENTILE = 0.25;
-
-export interface VadCalibration {
-  noiseFloor: number;
-  speechThreshold: number;
-  silenceThreshold: number;
-}
+export type { VadCalibration };
 
 export const useVoiceActivityDetection = (
   audioStream: MediaStream | null,
@@ -54,24 +35,15 @@ export const useVoiceActivityDetection = (
   options: UseVADOptions
 ) => {
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const silenceTimerRef = useRef<number | null>(null);
-  const speechSinceRef = useRef<number | null>(null);
   const frameRef = useRef<number | null>(null);
-  const speakingRef = useRef(false);
+  const vadRef = useRef(createVad());
   const levelRef = useRef(0);
   const peakRef = useRef(0);
   /** Last moment the level was above the speech threshold. Combined with the
    *  onset this gives how long the caller was actually audible, which is what
    *  separates a real utterance from a clip of room tone. */
   const lastVoiceAtRef = useRef(0);
-
-  const floorSamplesRef = useRef<number[]>([]);
-  const lastFloorSampleRef = useRef(0);
-  const calibrationRef = useRef<VadCalibration>({
-    noiseFloor: 0,
-    speechThreshold: MIN_SPEECH_RMS,
-    silenceThreshold: MIN_SILENCE_RMS,
-  });
+  const calibrationRef = useRef<VadCalibration>(vadRef.current.calibration);
 
   const {
     onSpeechEnd,
@@ -91,28 +63,6 @@ export const useVoiceActivityDetection = (
     tuningRef.current = { silenceDuration, speechDuration, speechFactor, silenceFactor };
   }, [onSpeechEnd, onSpeechStart, silenceDuration, speechDuration, speechFactor, silenceFactor]);
 
-  /** Low percentile of recent frames — a robust stand-in for "the room". */
-  const updateNoiseFloor = useCallback((rms: number) => {
-    const now = Date.now();
-    if (now - lastFloorSampleRef.current < FLOOR_SAMPLE_MS) return;
-    lastFloorSampleRef.current = now;
-
-    const samples = floorSamplesRef.current;
-    samples.push(rms);
-    if (samples.length > FLOOR_WINDOW) samples.shift();
-    if (samples.length < 8) return;
-
-    const sorted = [...samples].sort((a, b) => a - b);
-    const floor = sorted[Math.floor(sorted.length * FLOOR_PERCENTILE)];
-
-    const { speechFactor: sf, silenceFactor: qf } = tuningRef.current;
-    calibrationRef.current = {
-      noiseFloor: floor,
-      speechThreshold: Math.min(MAX_SPEECH_RMS, Math.max(MIN_SPEECH_RMS, floor * sf)),
-      silenceThreshold: Math.max(MIN_SILENCE_RMS, floor * qf),
-    };
-  }, []);
-
   const check = useCallback(function check() {
     const analyser = analyserRef.current;
     if (!analyser) return;
@@ -130,50 +80,29 @@ export const useVoiceActivityDetection = (
 
     levelRef.current = rms;
     if (rms > peakRef.current) peakRef.current = rms;
-    updateNoiseFloor(rms);
-    diag.logLevel(rms, calibrationRef.current);
 
-    const { speechThreshold, silenceThreshold } = calibrationRef.current;
-    const tuning = tuningRef.current;
+    const vad = vadRef.current;
+    const events = vad.push(rms, Date.now(), tuningRef.current);
+    calibrationRef.current = vad.calibration;
+    lastVoiceAtRef.current = vad.lastVoiceAt;
+    diag.logLevel(rms, vad.calibration);
 
-    // --- sustained speech -> onSpeechStart ---
-    if (rms >= speechThreshold) {
-      lastVoiceAtRef.current = Date.now();
-      if (speechSinceRef.current === null) speechSinceRef.current = Date.now();
-
-      if (!speakingRef.current && Date.now() - speechSinceRef.current >= tuning.speechDuration) {
-        speakingRef.current = true;
+    for (const event of events) {
+      if (event === 'start') {
         diag.log('vad', 'speech start', {
           rms: Number(rms.toFixed(4)),
-          threshold: Number(speechThreshold.toFixed(4)),
-          floor: Number(calibrationRef.current.noiseFloor.toFixed(4)),
+          threshold: Number(vad.calibration.speechThreshold.toFixed(4)),
+          floor: Number(vad.calibration.noiseFloor.toFixed(4)),
         });
         startRef.current?.();
+      } else {
+        diag.log('vad', 'speech end', { silenceWindowMs: tuningRef.current.silenceDuration });
+        endRef.current?.();
       }
-    } else {
-      speechSinceRef.current = null;
-    }
-
-    // --- continuous silence -> onSpeechEnd ---
-    if (rms < silenceThreshold) {
-      if (silenceTimerRef.current === null) {
-        const windowMs = tuning.silenceDuration;
-        silenceTimerRef.current = window.setTimeout(() => {
-          // Clear first: leaving this set means no later silence period can
-          // ever arm a new timer.
-          silenceTimerRef.current = null;
-          speakingRef.current = false;
-          diag.log('vad', 'speech end', { silenceWindowMs: windowMs });
-          endRef.current?.();
-        }, windowMs);
-      }
-    } else if (silenceTimerRef.current !== null) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
     }
 
     frameRef.current = requestAnimationFrame(check);
-  }, [updateNoiseFloor]);
+  }, []);
 
   useEffect(() => {
     if (!audioStream || !enabled) return;
@@ -185,19 +114,14 @@ export const useVoiceActivityDetection = (
     audioContext.createMediaStreamSource(audioStream).connect(analyser);
 
     analyserRef.current = analyser;
-    speakingRef.current = false;
-    speechSinceRef.current = null;
     peakRef.current = 0;
-    floorSamplesRef.current = [];
-    lastFloorSampleRef.current = 0;
+    vadRef.current.reset();
 
     diag.log('vad', 'started', { fftSize: analyser.fftSize });
     check();
 
     return () => {
-      if (silenceTimerRef.current !== null) clearTimeout(silenceTimerRef.current);
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
-      silenceTimerRef.current = null;
       frameRef.current = null;
       analyserRef.current = null;
       levelRef.current = 0;

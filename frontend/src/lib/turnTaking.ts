@@ -18,7 +18,7 @@
  * commands that come back.
  */
 
-import type { CallState } from '../stores/useBotStateStore';
+import type { CallState, TimelineKind } from '../stores/useBotStateStore';
 
 /** Thresholds and windows, all in milliseconds. */
 export const TIMING = {
@@ -38,6 +38,8 @@ export const TIMING = {
    * return nothing for near-silence; it returns caption boilerplate ("Thank
    * you."), which becomes a conversational turn. Not sending the clip is the
    * cheap half of the fix; the server rejects the artefact as the other half.
+   * Counted from when the caller began, onset included: it was once counted from
+   * when speech was confirmed, so a 430 ms "stop" read as 180 ms and was dropped.
    */
   MIN_SPOKEN_MS: 300,
   /** The same for an interruption, for the same reason as BARGE_SPEECH_MS. */
@@ -183,7 +185,8 @@ export type TurnTakingCommand =
   | { type: 'setUserSpeaking'; value: boolean }
   | { type: 'setThinking'; reason: string }
   | { type: 'trace'; label: string; detail?: string }
-  | { type: 'timeline'; op: 'start' | 'mark'; label: string };
+  | { type: 'timeline'; op: 'start'; kind: TimelineKind; backdateMs?: number }
+  | { type: 'timeline'; op: 'mark'; label: string };
 
 export interface Step {
   state: TurnTakingState;
@@ -208,7 +211,7 @@ function beginBarge(
     commands: [
       // The clock starts the instant the caller is heard over the agent: that
       // is what "how fast does it react to an interruption" actually means.
-      { type: 'timeline', op: 'start', label: 'interruption' },
+      { type: 'timeline', op: 'start', kind: 'interruption' },
       { type: 'timeline', op: 'mark', label: 'speech detected' },
       { type: 'pausePlayback' },
       { type: 'timeline', op: 'mark', label: 'playback paused' },
@@ -300,8 +303,9 @@ export function step(state: TurnTakingState, event: TurnTakingEvent): Step {
 
       // Speech-end fires one endpoint window after the caller fell quiet, so
       // subtracting it gives the span that was genuinely audible. The clock
-      // starts when speech is confirmed, which for an interruption is only
-      // BARGE_SPEECH_MS in; add that back so a short word is not undercounted.
+      // starts when speech is confirmed, which is one onset window after the
+      // caller began; add that back or a short word is undercounted by it (a
+      // 430 ms "stop" read as 180 ms and was dropped as noise).
       const endpointWindow =
         event.callState === 'paused' ? TIMING.ENDPOINT_OVER_SPEECH_MS : TIMING.ENDPOINT_MS;
       const spokenMs = Math.max(
@@ -310,7 +314,7 @@ export function step(state: TurnTakingState, event: TurnTakingEvent): Step {
           event.now -
             endpointWindow -
             state.speechStartedAt +
-            (state.barging ? TIMING.BARGE_SPEECH_MS : 0)
+            (state.barging ? TIMING.BARGE_SPEECH_MS : TIMING.SPEECH_ONSET_MS)
         )
       );
       const base: TurnTakingCommand[] = [{ type: 'setUserSpeaking', value: false }];
@@ -344,7 +348,12 @@ export function step(state: TurnTakingState, event: TurnTakingEvent): Step {
       ];
       // Optimistic: the server will confirm, but showing "thinking" now removes
       // a visible round trip of dead air.
-      if (!state.barging) commands.push({ type: 'setThinking', reason: 'optimistic (audio sent)' });
+      if (!state.barging) {
+        // What the caller feels runs from when they fell silent, not from when
+        // the detector gave up waiting, so the endpoint wait is part of it.
+        commands.push({ type: 'timeline', op: 'start', kind: 'turn', backdateMs: endpointWindow });
+        commands.push({ type: 'setThinking', reason: 'optimistic (audio sent)' });
+      }
       commands.push({ type: 'stopRecording' });
       return {
         state: { ...state, sawSpeech: false, pendingSend: send, clipsOwed: state.clipsOwed + 1 },
@@ -387,7 +396,7 @@ export function step(state: TurnTakingState, event: TurnTakingEvent): Step {
         // send does. It once went out with the previous send's leftovers: zero
         // length, no trim, so the server billed and trimmed the wrong thing.
         const spokenMs = Math.round(
-          event.now - state.speechStartedAt + (state.barging ? TIMING.BARGE_SPEECH_MS : 0)
+          event.now - state.speechStartedAt + (state.barging ? TIMING.BARGE_SPEECH_MS : TIMING.SPEECH_ONSET_MS)
         );
         const send = payload(state, event.now, spokenMs, event.chunksPlayed);
         return {

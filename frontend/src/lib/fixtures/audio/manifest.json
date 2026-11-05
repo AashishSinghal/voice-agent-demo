@@ -1,0 +1,68 @@
+[
+  {
+    "file": "stop-quick.wav",
+    "during": "idle",
+    "expect": "send",
+    "minSpokenMs": 300,
+    "note": "a quick spoken command must not be dropped as noise"
+  },
+  {
+    "file": "yes-quick.wav",
+    "during": "idle",
+    "expect": "send",
+    "note": "one-word answer"
+  },
+  {
+    "file": "no-quick.wav",
+    "during": "idle",
+    "expect": "send",
+    "note": "one-word answer"
+  },
+  {
+    "file": "question.wav",
+    "during": "idle",
+    "expect": "send",
+    "note": "an ordinary turn"
+  },
+  {
+    "file": "stop-quick.wav",
+    "during": "agent",
+    "expect": "send",
+    "duringPlayback": true,
+    "note": "a quick halt over the agent"
+  },
+  {
+    "file": "question.wav",
+    "during": "agent",
+    "expect": "send",
+    "duringPlayback": true,
+    "note": "a full interruption"
+  },
+  {
+    "file": "cough.wav",
+    "during": "idle",
+    "expect": "drop",
+    "note": "a burst of noise is not a turn"
+  },
+  {
+    "file": "fan.wav",
+    "during": "idle",
+    "expect": "drop",
+    "note": "steady fan noise",
+    "peak": 0.03
+  },
+  {
+    "file": "door.wav",
+    "during": "idle",
+    "expect": "drop",
+    "note": "a door slam"
+  },
+  {
+    "file": "hum.wav",
+    "during": "idle",
+    "expect": "drop",
+    "note": "a mains hum",
+    "peak": 0.03,
+    "known": "energy gate cannot tell a steady tone from a voice (LATENCY-AND-VAD step 3)"
+  }
+]

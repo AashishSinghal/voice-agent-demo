@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { shouldBargeOnArrival, shouldReleaseCurrent } from './interruptionRules.ts';
+import { shouldReleaseCurrent } from './interruptionRules.ts';
 
 test('the chunk already playing is released when a newer turn arrives', () => {
   // The regression from a real call: turn 6's last chunk was playing with an
@@ -30,27 +30,5 @@ test('nothing playing means nothing to release unless queued audio was dropped o
   assert.equal(
     shouldReleaseCurrent({ paused: true, droppedQueued: 0, playingTurn: null, incomingTurn: 7 }),
     true
-  );
-});
-
-test('audio arriving into live speech is held as an interruption', () => {
-  assert.equal(
-    shouldBargeOnArrival({ callerSpeaking: true, alreadyBarging: false, callActive: true }),
-    true
-  );
-});
-
-test('it is not re-armed when already barging, silent, or the call is over', () => {
-  assert.equal(
-    shouldBargeOnArrival({ callerSpeaking: true, alreadyBarging: true, callActive: true }),
-    false
-  );
-  assert.equal(
-    shouldBargeOnArrival({ callerSpeaking: false, alreadyBarging: false, callActive: true }),
-    false
-  );
-  assert.equal(
-    shouldBargeOnArrival({ callerSpeaking: true, alreadyBarging: false, callActive: false }),
-    false
   );
 });

@@ -176,6 +176,12 @@ Names only; see `backend/.env.example` for defaults and comments. Never commit
   `turn:interrupted` whenever a turn is replaced, and the playback hook releases
   the chunk playing from an older turn (`lib/interruptionRules.ts`). It once only
   dropped *queued* chunks, so the answer kept playing after being replaced.
+- **Turn-taking is one pure module.** `lib/turnTaking.ts` takes events (speech
+  start/end, audio arrived, server said something) and returns commands; the
+  VoiceAgent module only executes them. Change behaviour there, never by adding a
+  ref to the component. `lib/replay.ts` feeds a diagnostics bundle through it:
+  save a bad call with `node scripts/diag-to-fixture.ts <diagnostics.txt> <out.json>`
+  (it strips transcripts, so the fixture is safe to commit) and it becomes a test.
 - **Audio arriving into live speech is held.** The first chunk can land while the
   caller is mid-sentence (before speech is confirmed, or while the state reads
   "thinking"); it starts paused and is reported as a barge.

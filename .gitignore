@@ -99,3 +99,4 @@ brain/data/
 # Local connector config and secrets (see mcp.example.json)
 brain/mcp.json
 brain/.env
+!frontend/src/lib/fixtures/audio/**/*.wav

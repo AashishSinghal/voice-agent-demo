@@ -11,6 +11,8 @@ interface QueuedChunk {
 interface UseAudioPlaybackOptions {
   /** Every chunk of a finished turn has played out. */
   onTurnPlayed?: (turnId: number) => void;
+  /** The first chunk of a turn is audibly playing: the end of the caller's wait. */
+  onFirstAudio?: (turnId: number) => void;
   /** The browser refused to play audio — usually an autoplay restriction. */
   onBlocked?: (error: DOMException) => void;
 }
@@ -28,8 +30,13 @@ interface UseAudioPlaybackOptions {
  */
 export const useAudioPlayback = ({
   onTurnPlayed,
+  onFirstAudio,
   onBlocked,
 }: UseAudioPlaybackOptions = {}) => {
+  const onFirstAudioRef = useRef(onFirstAudio);
+  useEffect(() => {
+    onFirstAudioRef.current = onFirstAudio;
+  }, [onFirstAudio]);
   const queueRef = useRef<QueuedChunk[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const urlRef = useRef<string | null>(null);
@@ -203,6 +210,10 @@ export const useAudioPlayback = ({
       volume: audio.volume,
       muted: audio.muted,
     });
+
+    if (next.index === 0) {
+      audio.addEventListener('playing', () => onFirstAudioRef.current?.(next.turnId), { once: true });
+    }
 
     audio.play().catch((err: DOMException) => {
       // NotAllowedError here means the browser blocked playback for want of a

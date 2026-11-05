@@ -183,5 +183,23 @@ export const useConversationRecorder = () => {
     return result;
   }, []);
 
-  return { start, stop, discard, isRecording, recording };
+  /**
+   * What has been recorded so far, without ending the call. A bundle exported
+   * mid-call otherwise has no audio, because the file only exists after stop.
+   * Chunks are flushed every two seconds, so the last moments may be missing.
+   */
+  const snapshot = useCallback((): ConversationRecording | null => {
+    const caller = callerRef.current;
+    if (!caller) return null;
+    const blobOf = (track: Track | null) =>
+      track && track.chunks.length ? new Blob(track.chunks, { type: mimeType() }) : null;
+    return {
+      callerBlob: blobOf(caller),
+      agentBlob: blobOf(agentRef.current),
+      startedAt: startedAtRef.current,
+      durationMs: Date.now() - startedAtRef.current,
+    };
+  }, []);
+
+  return { start, stop, discard, snapshot, isRecording, recording };
 };
