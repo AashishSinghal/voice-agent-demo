@@ -35,6 +35,16 @@ export interface ChangeEntry {
 
 export const CHANGELOG: ChangeEntry[] = [
   {
+    date: '2026-11-06',
+    title: 'Interrupting the agent while it spoke sometimes showed an error',
+    kind: 'bug',
+    problem:
+      'In a live call, saying "What?" over a reply logged "Turn failed: Groq text-to-speech failed: The user aborted a request", sent an error to the page, and set the call back to listening in the middle of the new turn.',
+    cause:
+      'Cancelling a turn aborts its speech request. The check that lets an abort through compared against this runtime\'s own DOMException class, and the fetch layer\'s abort is not always that class, so it was reworded as a failure.',
+    fix: 'The check now goes by the error\'s name. A cancelled turn ends quietly.',
+  },
+  {
     date: '2026-11-05',
     title: 'A dropped connection made the agent forget the whole call',
     kind: 'bug',
