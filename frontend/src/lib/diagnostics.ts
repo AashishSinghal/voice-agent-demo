@@ -11,6 +11,8 @@
  * is tens of megabytes of PCM and none of it helps.
  */
 
+import { compactEntries } from './compactDiagnostics';
+
 export type DiagSource = 'client' | 'server' | 'socket-in' | 'socket-out' | 'vad' | 'audio';
 
 export interface DiagEntry {
@@ -101,14 +103,19 @@ class Diagnostics {
     return JSON.stringify(this.snapshot(), null, 2);
   }
 
-  /** Human-readable form — easier to skim and to paste into a conversation. */
-  toText(): string {
+  /**
+   * Human-readable form — easier to skim and to paste into a conversation.
+   * Leaves out the lines that only repeat others (see compactDiagnostics.ts);
+   * pass `full` to keep every entry.
+   */
+  toText({ full = false }: { full?: boolean } = {}): string {
     const snap = this.snapshot();
+    const entries = full ? snap.entries : compactEntries(snap.entries);
     const header = [
       `# voice-agent diagnostics`,
       `captured: ${snap.capturedAt}`,
       `duration: ${(snap.durationMs / 1000).toFixed(1)}s`,
-      `entries:  ${snap.entries.length}`,
+      `entries:  ${entries.length}${full ? '' : ` of ${snap.entries.length} (repeated lines left out)`}`,
       '',
       '## environment',
       ...Object.entries(snap.meta).map(([k, v]) => `${k}: ${JSON.stringify(v)}`),
@@ -116,7 +123,7 @@ class Diagnostics {
       '## timeline',
     ];
 
-    const lines = snap.entries.map((e) => {
+    const lines = entries.map((e) => {
       const time = (e.t / 1000).toFixed(2).padStart(7);
       const source = e.source.padEnd(10);
       const data = e.data ? ` ${JSON.stringify(e.data)}` : '';
