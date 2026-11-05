@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, Copy, Download, X } from 'lucide-react';
+import { SESSION_ID, sessionLink } from '../../hooks/useSocketConnection';
 import { useBotStateStore, median, percentile, type TimelineKind } from '../../stores/useBotStateStore';
 import type { VadCalibration } from '../../hooks/useVoiceActivityDetection';
 import { diag } from '../../lib/diagnostics';
@@ -297,6 +298,20 @@ const DebugPanel = ({
           <Row label="call state" value={state} />
           <Row label="socket" value={connected ? 'connected' : 'disconnected'} />
           <Row label="recording" value={isRecording ? 'yes' : 'no'} />
+        </section>
+        <section>
+          <h3 className="mb-1 text-[11px] uppercase tracking-wider text-zinc-600">Conversation</h3>
+          <p className="mb-2 break-all font-mono text-[11px] text-zinc-500">{SESSION_ID}</p>
+          <button
+            type="button"
+            onClick={() => navigator.clipboard.writeText(sessionLink())}
+            className="inline-flex items-center gap-1.5 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+          >
+            <Copy className="h-3.5 w-3.5" /> Copy link to resume
+          </button>
+          <p className="mt-1 text-[11px] text-zinc-600">
+            Opening the link continues this chat with the agent remembering it. Anyone with the link can.
+          </p>
         </section>
 
         <section>
