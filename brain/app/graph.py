@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import operator
 import time
 from collections.abc import Mapping
-import operator
 from typing import Annotated, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
