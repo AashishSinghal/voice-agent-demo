@@ -35,6 +35,50 @@ export interface ChangeEntry {
 
 export const CHANGELOG: ChangeEntry[] = [
   {
+    date: '2026-11-05',
+    title: 'Short commands like "stop" and "yes" were ignored outright',
+    kind: 'bug',
+    problem:
+      'Saying "stop", "yes" or "no" to an idle agent did nothing: no transcript, no reply, no error.',
+    cause:
+      'Two faults in the browser, neither visible on the server. The audible span was counted from when speech was confirmed, which is a quarter of a second after the caller began, so a 430 ms word read as 180 ms and fell under the 300 ms minimum. And "stop" has a closed-mouth gap before the "p": neither half lasted long enough to be confirmed as speech at all.',
+    fix: 'The span now includes the onset, and a dip under 120 ms no longer restarts the onset timer. Both are covered by a test that plays recorded clips through the real detector and turn-taking code with no microphone.',
+    metrics: [
+      { label: 'Commands dropped as noise, 3 in one call', before: '3', after: '0 (simulated clips)' },
+    ],
+  },
+  {
+    date: '2026-11-05',
+    title: 'Recording switched itself off for every later call',
+    kind: 'bug',
+    problem:
+      'Debug bundles kept saying "call recording was not enabled", so there was never audio to learn from.',
+    cause:
+      'Tapping "Turn off" on the recording notice once saved that choice in the browser, and every later call began unrecorded.',
+    fix: 'Recording is on at every page load; turning it off lasts for that page load only.',
+  },
+  {
+    date: '2026-11-05',
+    title: 'A bundle exported mid-call had no audio',
+    kind: 'bug',
+    problem:
+      'The bundle claimed recording had not been enabled even though the log showed it starting.',
+    cause:
+      'The audio file only exists once the call ends, and the export read only that finished file.',
+    fix: 'The export falls back to a snapshot of what has been recorded so far. The recorder flushes every two seconds, so the last moments of a live export may be missing.',
+  },
+  {
+    date: '2026-11-05',
+    title: 'Reply latency was never measured as the caller feels it',
+    kind: 'insight',
+    problem:
+      'The server logged its own timings, but the clock started when the clip arrived, so it left out the endpoint wait, the upload and the time for the browser to start playing.',
+    fix: 'A timer in the browser now runs from the moment the caller fell silent to the first chunk audibly playing, with P50 and P95 in the debug panel. Two ordinary turns on a laptop with the local voice: about 3.6 s, of which 900 ms is the endpoint wait and about 1.7 s is the server. Two samples, so a rough baseline, not a result.',
+    metrics: [
+      { label: 'Reply, stop talking to hearing it (n=2)', after: '3,678 and 3,530 ms' },
+    ],
+  },
+  {
     date: '2026-10-14',
     title: 'Interrupting stopped the sound but not the turn',
     kind: 'bug',
