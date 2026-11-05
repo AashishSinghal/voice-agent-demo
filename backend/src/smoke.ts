@@ -12,6 +12,7 @@ import { explainGroqTtsFailure } from './services/ttsService.js';
 import {
   validateAudioInput,
   validateBarge,
+  conversationKey,
   validatePlayback,
   plausibleClipMs,
 } from './services/validate.js';
@@ -250,6 +251,13 @@ console.log('\n--- socket payload validation ---');
   const spokenOverClip = validateAudioInput({ audio: clip, clipMs: 2000, spokenMs: 9000 });
   check('spokenMs cannot exceed the reported clip', spokenOverClip.ok && spokenOverClip.value.spokenMs, 2000);
 
+  const uuid = '3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b';
+  check('a UUID session id is namespaced', conversationKey(uuid, 'sock1'), `sess-${uuid}`);
+  check('the same id gives the same key after a reconnect', conversationKey(uuid, 'sock2'), `sess-${uuid}`);
+  check('no session id falls back to the socket id', conversationKey(undefined, 'sock1'), 'sock1');
+  check('a socket id passed as the session id is not trusted', conversationKey('sock9', 'sock1'), 'sock1');
+  check('a non-string session id is not trusted', conversationKey({ a: 1 }, 'sock1'), 'sock1');
+  check('a session id can never equal a socket id', conversationKey(uuid, 'sock1').startsWith('sess-'), true);
   check('barge accepted', validateBarge({ turnId: 3, chunksPlayed: 2 }), { ok: true, value: { turnId: 3, chunksPlayed: 2 } });
   check('barge clamps chunksPlayed', validateBarge({ turnId: 3, chunksPlayed: -4 }).ok, true);
   for (const bad of [undefined, null, {}, { turnId: '3' }, { turnId: 1.5 }, { turnId: -1 }, { turnId: NaN }, { turnId: 3, chunksPlayed: 'x' }]) {
