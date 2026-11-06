@@ -30,7 +30,6 @@ from typing import Annotated, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
-from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -81,8 +80,6 @@ def build_graph(
 ):
     guard = CostGuard(tiers=settings.tiers, cap_usd=settings.turn_budget_usd, max_steps=settings.max_steps)
     toolset = toolset or ToolSet()
-    tools = toolset.tools()
-    schemas = [convert_to_openai_tool(t) for t in tools]
 
     async def call_model(state: State) -> dict:
         write = get_stream_writer()
@@ -92,14 +89,14 @@ def build_graph(
         ctx = assemble(
             system=SYSTEM_PROMPT,
             history=state["messages"],
-            tools=schemas,
+            tools=toolset.schemas(),
             window=settings.context_window,
             reserve_output=settings.reserve_output,
         )
         write({"type": "context", "report": ctx.report.to_dict()})
 
         kept = {s["function"]["name"] for s in ctx.tools}
-        bound_tools = [t for t in tools if t.name in kept]
+        bound_tools = [t for t in toolset.tools() if t.name in kept]
         preferred = settings.tiers[0].name if settings.tiers else None
 
         # Walk the chain. A tier that is over budget is skipped by the guard; a

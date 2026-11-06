@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .mcp_client import McpClient
-from .tools import Risk, ToolSet, _mcp_tool
+from .tools import ConfigError, Policy, ToolSet  # noqa: F401  (re-exported for config callers)
 
 log = logging.getLogger("connectors")
 
@@ -59,45 +59,6 @@ def default_config() -> dict:
     if BUILTIN_SERVERS["notes"].exists():
         return DEFAULT_CONFIG
     return {"mcpServers": {}}
-
-
-class ConfigError(Exception):
-    pass
-
-
-@dataclass
-class Policy:
-    read_only: bool = False
-    allow: list[str] | None = None
-    deny: list[str] = field(default_factory=list)
-    unannotated: Risk = "confirm"
-    # Tools the user vouches for as safe despite the server's annotations, e.g.
-    # a search that is a POST. An explicit opt-in per tool, never a blanket.
-    safe: list[str] = field(default_factory=list)
-
-    @classmethod
-    def parse(cls, raw: dict[str, Any] | None) -> Policy:
-        raw = raw or {}
-        unannotated = raw.get("unannotated", "confirm")
-        if unannotated not in ("safe", "confirm"):
-            raise ConfigError("policy.unannotated must be 'safe' or 'confirm'")
-        return cls(
-            read_only=bool(raw.get("readOnly", False)),
-            allow=raw.get("allow"),
-            deny=list(raw.get("deny", [])),
-            unannotated=unannotated,
-            safe=list(raw.get("safe", [])),
-        )
-
-    def admits(self, definition: dict[str, Any]) -> bool:
-        name = definition["name"]
-        if name in self.deny:
-            return False
-        if self.allow is not None and name not in self.allow:
-            return False
-        if self.read_only and not (definition.get("annotations") or {}).get("readOnlyHint"):
-            return False
-        return True
 
 
 @dataclass
@@ -192,25 +153,15 @@ async def connect_all(specs: list[ConnectorSpec], toolset: ToolSet) -> list[Conn
     for spec in specs:
         client = McpClient(spec.name, spec.command, spec.env)
         try:
-            await client.start(timeout=spec.startup_timeout)
-            definitions = [d for d in await client.list_tools() if spec.policy.admits(d)]
-            entries = [
-                _mcp_tool(
-                    client,
-                    d,
-                    exposed=f"{spec.name}__{d['name']}"[:64] if spec.prefix else None,
-                    unannotated=spec.policy.unannotated,
-                    force_safe=d["name"] in spec.policy.safe,
-                )
-                for d in definitions
-            ]
-            toolset.entries.extend(entries)
-            toolset.clients.append(client)
-            toolset.__post_init__()  # duplicate-name check
-            statuses.append(ConnectorStatus(spec.name, True, [e.name for e in entries]))
-            log.info("connector %s: %d tools", spec.name, len(entries))
+            names = await toolset.add_connector(
+                client,
+                spec.policy,
+                namespace=spec.name if spec.prefix else None,
+                startup_timeout=spec.startup_timeout,
+            )
+            statuses.append(ConnectorStatus(spec.name, True, names))
+            log.info("connector %s: %d tools", spec.name, len(names))
         except Exception as exc:  # one broken server must not stop the rest
-            await client.close()
             statuses.append(ConnectorStatus(spec.name, False, error=f"{type(exc).__name__}: {exc}"))
             log.warning("connector %s failed: %s", spec.name, exc)
     return statuses
