@@ -56,6 +56,11 @@ must be told. Behaviour:
   overwritten;
 - `spoken` empty: the reply is removed.
 
+`report_id` (optional, up to 64 characters) names the report. The id is stored
+in the thread, and a second report with an id already applied does nothing and
+answers `{"updated": false, "duplicate": true}`, so the gateway can retry after
+a timeout without removing a reply twice.
+
 The gateway fires this without blocking the interruption path; its client makes
 the next `/v1/turn` for the same session wait for it.
 
