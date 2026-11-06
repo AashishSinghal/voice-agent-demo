@@ -162,6 +162,8 @@ def create_app(
             ],
         }
 
+    heard_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
     @app.post("/v1/threads/{session_id}/heard", **secured)
     async def heard(session_id: str, req: HeardRequest):
         """Rewrite the last reply to what the caller actually heard.
@@ -171,8 +173,19 @@ def create_app(
         """
         graph = (await get_runtime()).graph
         config = {"configurable": {"thread_id": session_id}}
+        # A timed-out attempt may still be running here when its retry arrives.
+        lock = heard_locks.get(session_id) or heard_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            return await apply_heard(graph, config, req)
+
+    async def apply_heard(graph, config, req: HeardRequest):
         snapshot = await graph.aget_state(config)
-        messages = (snapshot.values or {}).get("messages", [])
+        values = snapshot.values or {}
+        messages = values.get("messages", [])
+        # Removing a reply is not repeatable (a second run would remove the
+        # previous turn's), so a report already applied must be a no-op.
+        if req.report_id and req.report_id in values.get("heard_ids", []):
+            return {"updated": False, "duplicate": True}
         if not messages or await pending_approvals(graph, config):
             # Nothing to rewrite, or the thread is paused on a question: adding
             # a message now would corrupt the call the approval will resume.
@@ -195,7 +208,8 @@ def create_app(
             update = AIMessage(content=spoken, additional_kwargs=extra)
         else:
             return {"updated": False}
-        await graph.aupdate_state(config, {"messages": [update]}, as_node="call_model")
+        marker = {"heard_ids": [req.report_id]} if req.report_id else {}
+        await graph.aupdate_state(config, {"messages": [update], **marker}, as_node="call_model")
         return {"updated": True}
 
     return app
