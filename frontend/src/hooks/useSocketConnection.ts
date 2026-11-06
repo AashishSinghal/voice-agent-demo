@@ -64,12 +64,20 @@ interface Handlers {
   onCallEnded: () => void;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * One random id per page load, resent on every reconnect. The server files the
+ * One id per page load, resent on every reconnect. The server files the
  * conversation under it, so a dropped connection no longer wipes the agent's
- * memory of the call. Not a secret and not a login: it only names a thread.
+ * memory of the call. Opening the page with `?session=<id>` reuses an earlier
+ * call's id, which picks that conversation up again. It is the only thing that
+ * names the thread, so treat a link carrying it like a password to that chat.
  */
-const SESSION_ID = crypto.randomUUID();
+const requested = new URLSearchParams(window.location.search).get('session');
+export const SESSION_ID = requested && UUID.test(requested) ? requested.toLowerCase() : crypto.randomUUID();
+
+/** A link that reopens this conversation. */
+export const sessionLink = () => `${window.location.origin}${window.location.pathname}?session=${SESSION_ID}`;
 
 export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
   const socketRef = useRef<Socket | null>(null);
