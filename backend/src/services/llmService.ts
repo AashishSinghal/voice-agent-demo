@@ -104,10 +104,11 @@ export async function* streamResponse(
   signal: AbortSignal,
   resumeHint?: string | null,
   onFinish?: (info: FinishInfo) => void,
-  sessionId?: string
+  sessionId?: string,
+  owner?: string | null
 ): AsyncGenerator<string> {
   if (activeProvider() === 'brain') {
-    yield* streamFromBrain(query, sessionId ?? 'default', signal, onFinish);
+    yield* streamFromBrain(query, sessionId ?? 'default', signal, onFinish, owner);
     return;
   }
 
@@ -125,14 +126,15 @@ async function* streamFromBrain(
   query: string,
   sessionId: string,
   signal: AbortSignal,
-  onFinish?: (info: FinishInfo) => void
+  onFinish?: (info: FinishInfo) => void,
+  owner?: string | null
 ): AsyncGenerator<string> {
   let tokens = 0;
   let promptTokens = 0;
   let completionTokens = 0;
   let reason: string | null = null;
 
-  for await (const event of streamTurn(sessionId, query, signal)) {
+  for await (const event of streamTurn(sessionId, query, signal, owner)) {
     if (signal.aborted) return;
     switch (event.type) {
       case 'token':

@@ -18,6 +18,7 @@ import {
   installLogBridge,
   subscribeToSessionLogs,
   runInSession,
+  describeError,
 } from './services/logBridge.js';
 import {
   Limiter,
@@ -28,6 +29,7 @@ import {
 import {
   DEFAULT_MAX_AUDIO_BYTES,
   conversationKey,
+  ownerFromKey,
 } from './services/validate.js';
 
 dotenv.config();
@@ -147,6 +149,8 @@ io.on('connection', (socket: Socket) => {
   const trace = traceFactory(socket.id);
   /** What the brain files this call's history under; survives a reconnect. */
   const threadId = conversationKey(socket.handshake.auth?.sessionId, socket.id);
+  /** Whose connected accounts this call may use; null if the page sent no valid key. */
+  const owner = ownerFromKey(socket.handshake.auth?.ownerKey);
 
   // Tell the page which model path it is on. Sent over the socket rather than
   // left for the page to fetch from /health: the socket is websocket-only and so
@@ -248,7 +252,7 @@ io.on('connection', (socket: Socket) => {
       },
       transcribe,
       respond: ({ query, history, signal, resumeHint, onFinish }) =>
-        llm.streamResponse(query, history, signal, resumeHint, onFinish, threadId),
+        llm.streamResponse(query, history, signal, resumeHint, onFinish, threadId, owner),
       synthesize: (text, signal) => tts.synthesizeSpeechFromText(text, signal),
       // Only the brain keeps its own history, so only it needs telling.
       reportHeard: (spoken, unspoken) => {
@@ -271,6 +275,29 @@ io.on('connection', (socket: Socket) => {
   socket.on('playback:progress', () => {});
   socket.on('playback:complete', (raw: unknown) => call.playbackComplete(raw));
   socket.on('call:end', () => call.callEnd());
+
+  // Connecting accounts (Notion). Answered over the socket so the page needs no
+  // CORS and the brain's key never leaves the server.
+  const connections =
+    (run: (owner: string) => Promise<unknown>) =>
+    async (_payload: unknown, ack?: (reply: unknown) => void) => {
+      if (typeof ack !== 'function') return;
+      if (!owner || llm.activeProvider() !== 'brain') return ack({ ok: true, available: [], connected: [] });
+      try {
+        ack({ ok: true, ...((await run(owner)) as object) });
+      } catch (error) {
+        console.warn(`connections call failed: ${describeError(error)}`);
+        ack({ ok: false, error: 'Could not reach the assistant\'s account service.' });
+      }
+    };
+  const serviceOf = (payload: unknown) => String((payload as { service?: unknown })?.service ?? '').slice(0, 32);
+  socket.on('connections:list', connections(() => brain.listConnections(owner!)));
+  socket.on('connections:start', (payload: unknown, ack?: (reply: unknown) => void) =>
+    connections(() => brain.startConnection(owner!, serviceOf(payload)))(payload, ack)
+  );
+  socket.on('connections:remove', (payload: unknown, ack?: (reply: unknown) => void) =>
+    connections(() => brain.removeConnection(owner!, serviceOf(payload)))(payload, ack)
+  );
 
   const watchdog = setInterval(() => runInSession(socket.id, () => call.watchdogTick()), 2000);
 

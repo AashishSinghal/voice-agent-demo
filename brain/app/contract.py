@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 class TurnRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1, max_length=4000)
+    # Who is asking, as an opaque id; selects the accounts they have connected.
+    owner: str | None = Field(default=None, pattern=r"^[0-9a-f]{16,64}$")
 
 
 class HeardRequest(BaseModel):

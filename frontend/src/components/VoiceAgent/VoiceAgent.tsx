@@ -125,6 +125,7 @@ const VoiceAgent = () => {
     cancelBarge,
     notifyPlaybackProgress,
     notifyPlaybackComplete,
+    connectionsApi,
   } = useSocketConnection(SERVER_URL, {
     onAudioChunk: (chunk) => {
       chunkRef.current = chunk;
@@ -463,6 +464,7 @@ const VoiceAgent = () => {
         onToggleRecordCall={setRecordCall}
         conversationRecording={conversationRecorder.recording}
         snapshotRecording={conversationRecorder.snapshot}
+        connectionsApi={connectionsApi}
         isRecordingCall={conversationRecorder.isRecording}
       />
     </div>

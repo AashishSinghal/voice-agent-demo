@@ -15,6 +15,7 @@ import {
   validateAudioInput,
   validateBarge,
   conversationKey,
+  ownerFromKey,
   validatePlayback,
   plausibleClipMs,
 } from './services/validate.js';
@@ -504,6 +505,18 @@ console.log('\n--- brain event stream ---');
   );
 }
 
+
+console.log('\n--- who owns the accounts a call connects ---');
+{
+  const key = 'ab'.repeat(32);
+  const owner = ownerFromKey(key);
+  check('a valid key yields an owner', /^[0-9a-f]{64}$/.test(owner ?? ''), true);
+  check('the owner is not the key itself', owner === key, false);
+  check('the same key is the same owner', ownerFromKey(key), owner);
+  check('another key is another owner', ownerFromKey('cd'.repeat(32)) === owner, false);
+  check('a malformed key is no owner', ownerFromKey('short'), null);
+  check('a non-string is no owner', ownerFromKey(12345), null);
+}
 
 console.log('\n--- a whole call, with scripted collaborators ---');
 {

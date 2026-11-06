@@ -134,13 +134,14 @@ const pendingHeard = new Map<string, Promise<void>>();
 export async function* streamTurn(
   sessionId: string,
   text: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  owner?: string | null
 ): AsyncGenerator<BrainEvent> {
   await pendingHeard.get(sessionId);
   const response = await fetch(`${brainUrl()}/v1/turn`, {
     method: 'POST',
     headers: brainHeaders({ 'content-type': 'application/json', accept: 'text/event-stream' }),
-    body: JSON.stringify({ session_id: sessionId, text }),
+    body: JSON.stringify({ session_id: sessionId, text, ...(owner ? { owner } : {}) }),
     signal,
   });
   if (!response.ok || !response.body) {
@@ -156,6 +157,28 @@ export async function* streamTurn(
     }
   }
 }
+
+export interface ConnectionsView {
+  available: string[];
+  connected: { service: string; workspace?: string }[];
+}
+
+async function connectionsCall<T>(method: string, path: string): Promise<T> {
+  const response = await fetch(`${brainUrl()}${path}`, {
+    method,
+    headers: brainHeaders({ 'content-type': 'application/json' }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`Brain returned ${response.status}`);
+  return (await response.json()) as T;
+}
+
+export const listConnections = (owner: string) =>
+  connectionsCall<ConnectionsView>('GET', `/v1/owners/${owner}/connections`);
+export const startConnection = (owner: string, service: string) =>
+  connectionsCall<{ url: string }>('POST', `/v1/owners/${owner}/connections/${encodeURIComponent(service)}/start`);
+export const removeConnection = (owner: string, service: string) =>
+  connectionsCall<{ removed: boolean }>('DELETE', `/v1/owners/${owner}/connections/${encodeURIComponent(service)}`);
 
 /** Tell the brain what the caller actually heard of its last reply. */
 export function reportHeard(sessionId: string, spoken: string, unspoken: string | null): void {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 /**
  * Validation for everything a socket client can send.
  *
@@ -76,6 +77,16 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
  * never equal a real socket id, which would let a caller pick up someone else's
  * thread. Anything that is not a UUID falls back to the socket id.
  */
+/**
+ * Who a connection belongs to, from a secret the browser keeps and never puts in
+ * a URL. The brain only ever sees the hash, so a leaked log line or a shared
+ * resume link does not hand over anyone's connected accounts.
+ */
+export function ownerFromKey(ownerKey: unknown): string | null {
+  if (typeof ownerKey !== 'string' || !/^[0-9a-f]{32,128}$/i.test(ownerKey)) return null;
+  return createHash('sha256').update(`owner:${ownerKey.toLowerCase()}`).digest('hex');
+}
+
 export function conversationKey(sessionId: unknown, socketId: string): string {
   return typeof sessionId === 'string' && SESSION_ID.test(sessionId)
     ? `sess-${sessionId.toLowerCase()}`

@@ -9,6 +9,7 @@ cannot quietly ship a destructive tool as a safe one.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -154,6 +155,30 @@ def _mcp_tool(
 
 
 @dataclass
+class ToolView:
+    """The tools one caller can use right now: shared ones plus their own."""
+
+    entries: list[ToolEntry]
+    _schemas: list[dict] | None = field(default=None, repr=False)
+
+    def get(self, name: str) -> ToolEntry | None:
+        return next((e for e in self.entries if e.name == name), None)
+
+    def tools(self) -> list[BaseTool]:
+        return [e.tool for e in self.entries]
+
+    def schemas(self) -> list[dict]:
+        """The tools as the model sees them; rebuilt only when the set changes."""
+        if self._schemas is None:
+            self._schemas = [convert_to_openai_tool(t) for t in self.tools()]
+        return self._schemas
+
+
+# Tools that belong to one user (their connected accounts), looked up per turn.
+OwnerSource = Callable[[str], Awaitable[list[ToolEntry]]]
+
+
+@dataclass
 class ToolSet:
     """Every tool the model can call, and the one place that decides which.
 
@@ -163,6 +188,7 @@ class ToolSet:
 
     entries: list[ToolEntry] = field(default_factory=local_entries)
     clients: list[McpClient] = field(default_factory=list)
+    owner_sources: list[OwnerSource] = field(default_factory=list)
     _schemas: list[dict] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -186,6 +212,13 @@ class ToolSet:
         if self._schemas is None:
             self._schemas = [convert_to_openai_tool(t) for t in self.tools()]
         return self._schemas
+
+    async def for_owner(self, owner: str | None) -> ToolSet | ToolView:
+        """What this caller can use: the shared tools plus their connected accounts."""
+        if not owner or not self.owner_sources:
+            return self
+        own = [e for source in self.owner_sources for e in await source(owner)]
+        return ToolView([*self.entries, *own]) if own else self
 
     async def add_connector(
         self,
