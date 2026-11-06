@@ -91,3 +91,12 @@ Each turn has a budget (`BRAIN_TURN_BUDGET_USD`, default $0.50) and a step cap
 (`BRAIN_MAX_STEPS`, default 6). Before every model call the guard projects the
 cost and steps down Frontier -> Mid -> Local, or halts a runaway loop. A
 degraded turn still returns a spoken reply and `done.degraded = true`.
+
+## Event fixtures
+
+`docs/contract/events.json` holds one example of every streamed event: the wire
+form the brain emits and the form the gateway parses it into. The brain's tests
+check each `wire` against its models (and that every event type has a fixture);
+the gateway's `npm test` checks each `wire` parses to `gateway`. Adding or
+renaming an event means changing this file, which fails whichever side was not
+updated.

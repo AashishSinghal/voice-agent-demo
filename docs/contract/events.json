@@ -1,0 +1,65 @@
+[
+  {
+    "wire": { "type": "token", "text": "Hello" },
+    "gateway": { "type": "token", "text": "Hello" }
+  },
+  {
+    "wire": { "type": "tool_call", "id": "c1", "name": "read_note", "args": { "note": "ideas" } },
+    "gateway": { "type": "tool_call", "id": "c1", "name": "read_note", "args": { "note": "ideas" } }
+  },
+  {
+    "wire": { "type": "tool_result", "id": "c1", "name": "read_note", "content": "buy milk" },
+    "gateway": { "type": "tool_result", "id": "c1", "name": "read_note", "content": "buy milk" }
+  },
+  {
+    "wire": {
+      "type": "approval_required",
+      "call_id": "c2",
+      "tool": "delete_note",
+      "args": { "note": "ideas" },
+      "prompt": "I'm about to delete the note ideas. Should I go ahead?"
+    },
+    "gateway": {
+      "type": "approval_required",
+      "callId": "c2",
+      "tool": "delete_note",
+      "args": { "note": "ideas" },
+      "prompt": "I'm about to delete the note ideas. Should I go ahead?"
+    }
+  },
+  {
+    "wire": { "type": "context", "report": { "total_used": 120 } },
+    "gateway": { "type": "context", "report": { "total_used": 120 } }
+  },
+  {
+    "wire": {
+      "type": "usage",
+      "tier": "primary",
+      "model": "m",
+      "prompt_tokens": 10,
+      "completion_tokens": 5,
+      "usd": 0.001,
+      "turn_usd": 0.002,
+      "degraded_from": null
+    },
+    "gateway": {
+      "type": "usage",
+      "usage": { "tier": "primary", "model": "m", "promptTokens": 10, "completionTokens": 5, "usd": 0.001, "degradedFrom": null }
+    }
+  },
+  {
+    "wire": {
+      "type": "done",
+      "text": "Hi.",
+      "turn_usd": 0.002,
+      "steps": 1,
+      "degraded": true,
+      "awaiting_approval": true
+    },
+    "gateway": { "type": "done", "text": "Hi.", "turnUsd": 0.002, "steps": 1, "degraded": true, "awaitingApproval": true }
+  },
+  {
+    "wire": { "type": "error", "message": "boom" },
+    "gateway": { "type": "error", "message": "boom" }
+  }
+]
