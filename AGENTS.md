@@ -35,7 +35,9 @@ around the model, so everything must hold up with a small, cheap model.
 
 ```
 backend/src/
-  server.ts                    socket protocol, call state, interruption triage, watchdog
+  server.ts                    socket wiring: connect limits, log bridge, binds Call's ports
+  services/call.ts             one call's state machine: turns, barge-in, heard, watchdog;
+                               every collaborator is a port, so tests drive a whole call
   services/conversation.ts     history; truncation to what was actually heard
   services/backchannel.ts      "mhm" vs a real interruption; Whisper silence artefacts
   services/sentenceChunker.ts  token stream -> speakable sentences
