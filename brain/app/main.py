@@ -10,7 +10,6 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, RemoveMessage
 from sse_starlette.sse import EventSourceResponse
 
 from .connectors import connect_all, environment, load_specs
@@ -18,7 +17,8 @@ from .contract import HeardRequest, TurnRequest
 from .graph import build_graph
 from .settings import Settings
 from .store import open_checkpointer
-from .stream import pending_approvals, run_turn
+from .stream import run_turn
+from .thread import Threads
 from .tools import ToolSet
 
 
@@ -35,6 +35,7 @@ def create_app(
         toolset: ToolSet
         connectors: list
         stack: AsyncExitStack
+        threads: Threads
         loop: asyncio.AbstractEventLoop  # database pools and subprocess pipes belong to it
 
     state: dict[str, Runtime | None] = {"runtime": None}
@@ -76,7 +77,7 @@ def create_app(
                 except BaseException:
                     await stack.aclose()
                     raise
-                state["runtime"] = Runtime(graph, tools, connectors, stack, loop)
+                state["runtime"] = Runtime(graph, tools, connectors, stack, Threads(graph), loop)
             return state["runtime"]
 
     @asynccontextmanager
@@ -142,74 +143,10 @@ def create_app(
 
     @app.get("/v1/threads/{session_id}", **secured)
     async def thread(session_id: str):
-        graph = (await get_runtime()).graph
-        snapshot = await graph.aget_state({"configurable": {"thread_id": session_id}})
-        values = snapshot.values or {}
-        pending = await pending_approvals(graph, {"configurable": {"thread_id": session_id}})
-        return {
-            "sessionId": session_id,
-            "messages": len(values.get("messages", [])),
-            "sessionUsd": values.get("session_usd", 0.0),
-            "pendingApproval": pending[0] if pending else None,
-            "history": [
-                {
-                    "role": m.type,
-                    "content": m.content if isinstance(m.content, str) else str(m.content),
-                    "interrupted": bool(m.additional_kwargs.get("interrupted")),
-                    "unspoken": m.additional_kwargs.get("unspoken"),
-                }
-                for m in values.get("messages", [])
-            ],
-        }
-
-    heard_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+        return await (await get_runtime()).threads.history(session_id)
 
     @app.post("/v1/threads/{session_id}/heard", **secured)
     async def heard(session_id: str, req: HeardRequest):
-        """Rewrite the last reply to what the caller actually heard.
-
-        The brain checkpoints its own history, so without this it would keep
-        the full generated text and later refer to sentences nobody heard.
-        """
-        graph = (await get_runtime()).graph
-        config = {"configurable": {"thread_id": session_id}}
-        # A timed-out attempt may still be running here when its retry arrives.
-        lock = heard_locks.get(session_id) or heard_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            return await apply_heard(graph, config, req)
-
-    async def apply_heard(graph, config, req: HeardRequest):
-        snapshot = await graph.aget_state(config)
-        values = snapshot.values or {}
-        messages = values.get("messages", [])
-        # Removing a reply is not repeatable (a second run would remove the
-        # previous turn's), so a report already applied must be a no-op.
-        if req.report_id and req.report_id in values.get("heard_ids", []):
-            return {"updated": False, "duplicate": True}
-        if not messages or await pending_approvals(graph, config):
-            # Nothing to rewrite, or the thread is paused on a question: adding
-            # a message now would corrupt the call the approval will resume.
-            return {"updated": False}
-
-        spoken = req.spoken.strip()
-        last = messages[-1]
-        extra = {"interrupted": True, "unspoken": req.unspoken or None}
-        # A reply cut off before the graph finished never reached the
-        # checkpoint: the thread then ends on the caller's message, and the
-        # heard text must be appended. Rewriting "the last assistant message"
-        # blindly would overwrite the previous turn's answer.
-        if isinstance(last, AIMessage) and not last.tool_calls:
-            update = (
-                AIMessage(content=spoken, id=last.id, additional_kwargs=extra)
-                if spoken
-                else RemoveMessage(id=last.id)
-            )
-        elif spoken:
-            update = AIMessage(content=spoken, additional_kwargs=extra)
-        else:
-            return {"updated": False}
-        marker = {"heard_ids": [req.report_id]} if req.report_id else {}
-        await graph.aupdate_state(config, {"messages": [update], **marker}, as_node="call_model")
-        return {"updated": True}
+        return await (await get_runtime()).threads.apply_heard(session_id, req)
 
     return app

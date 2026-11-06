@@ -14,10 +14,12 @@ import Attribution from './Attribution';
 import Changelog from '../Changelog';
 import { toast } from 'sonner';
 import { diag } from '../../lib/diagnostics';
+import { executeCommand } from '../../lib/executeCommand';
 import {
   initialState,
   step,
   TIMING,
+  VAD_FACTORS,
   vadTuning,
   type TurnTakingCommand,
   type TurnTakingEvent,
@@ -25,13 +27,6 @@ import {
 } from '../../lib/turnTaking';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
-
-/**
- * Thresholds are calibrated from the room by the VAD hook; these are the
- * multipliers applied to the measured noise floor.
- */
-const SPEECH_FACTOR = 3.0;
-const SILENCE_FACTOR = 1.8;
 
 /**
  * How often the client tells the server it is still playing.
@@ -190,56 +185,24 @@ const VoiceAgent = () => {
   /** Carries a command of the turn-taking module out into the world. */
   useEffect(() => {
     playbackRef.current = playback;
-    execute.current = (command) => {
-      switch (command.type) {
-        case 'enqueueAudio':
-          if (chunkRef.current) playback.enqueue(chunkRef.current, { startPaused: command.hold });
-          break;
-        case 'pausePlayback':
-          playback.pause();
-          break;
-        case 'resumePlayback':
-          playback.resume();
-          break;
-        case 'stopPlayback':
-          playback.stop();
-          break;
-        case 'resetPlaybackCounter':
-          playback.resetCounter();
-          break;
-        case 'notifyBarge':
-          notifyBarge(command.turnId, command.chunksPlayed);
-          break;
-        case 'cancelBarge':
-          cancelBarge(command.reason);
-          break;
-        case 'stopRecording':
-          recorder.stopRecording();
-          break;
-        case 'discardRecording':
-          recorder.discardRecording();
-          break;
-        case 'sendClip':
-          if (clipRef.current) sendAudio(clipRef.current, command.send);
-          break;
-        case 'dropClip':
-          diag.log('audio', 'recording dropped', { reason: command.reason, bytes: clipRef.current?.size ?? 0 });
-          break;
-        case 'setUserSpeaking':
-          setUserSpeaking(command.value);
-          break;
-        case 'setThinking':
-          setCallState('thinking', command.reason);
-          break;
-        case 'trace':
-          trace(command.label, command.detail);
-          break;
-        case 'timeline':
-          if (command.op === 'start') startTimeline(command.kind, command.backdateMs);
-          else markTimeline(command.label);
-          break;
-      }
-    };
+    execute.current = (command) =>
+      executeCommand<AudioChunk, Blob>(command, {
+        heldChunk: () => chunkRef.current,
+        heldClip: () => clipRef.current,
+        playback,
+        recorder: { stop: recorder.stopRecording, discard: recorder.discardRecording },
+        server: { sendAudio, notifyBarge, cancelBarge },
+        ui: {
+          setUserSpeaking,
+          setThinking: (reason) => setCallState('thinking', reason),
+          startTimeline,
+          markTimeline,
+        },
+        log: {
+          trace,
+          clipDropped: (reason, clip) => diag.log('audio', 'recording dropped', { reason, bytes: clip?.size ?? 0 }),
+        },
+      });
   });
 
   /** Speech detected: the module decides whether this is a turn or a barge-in. */
@@ -273,8 +236,7 @@ const VoiceAgent = () => {
       onSpeechEnd: handleSpeechEnd,
       silenceDuration: tuning.silenceDurationMs,
       speechDuration: tuning.speechDurationMs,
-      speechFactor: SPEECH_FACTOR,
-      silenceFactor: SILENCE_FACTOR,
+      ...VAD_FACTORS,
     }
   );
 
@@ -306,8 +268,7 @@ const VoiceAgent = () => {
       serverUrl: SERVER_URL,
       micLabel: track?.label ?? 'unknown',
       micSettings: track?.getSettings?.() ?? {},
-      speechFactor: SPEECH_FACTOR,
-      silenceFactor: SILENCE_FACTOR,
+      ...VAD_FACTORS,
       endpointMs: TIMING.ENDPOINT_MS,
       endpointOverSpeechMs: TIMING.ENDPOINT_OVER_SPEECH_MS,
       maxTurnMs: TIMING.MAX_TURN_MS,

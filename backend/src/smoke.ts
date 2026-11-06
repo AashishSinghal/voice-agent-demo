@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { Conversation } from './services/conversation.js';
+import { Call } from './services/call.js';
 import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
 import {
   installLogBridge,
@@ -501,6 +502,143 @@ console.log('\n--- brain event stream ---');
     parseBrainEvent({ type: 'usage', tier: 'mid', model: 'm', prompt_tokens: 5, completion_tokens: 2, usd: 0.1, degraded_from: 'frontier' }),
     { type: 'usage', usage: { tier: 'mid', model: 'm', promptTokens: 5, completionTokens: 2, usd: 0.1, degradedFrom: 'frontier' } }
   );
+}
+
+
+console.log('\n--- a whole call, with scripted collaborators ---');
+{
+  type Sent = { event: string; payload?: Record<string, any> };
+  const finish = { reason: 'stop', tokens: 4, promptTokens: 1, completionTokens: 4 };
+
+  const scripted = (transcripts: (string | null)[], opts: { refuse?: boolean } = {}) => {
+    const sent: Sent[] = [];
+    const heard: { spoken: string; unspoken: string | null }[] = [];
+    let transcribed = 0;
+    const call = new Call(
+      {
+        emit: (event, payload) => {
+          sent.push({ event, payload });
+        },
+        transcribe: async () => {
+          const text = transcripts[transcribed++];
+          return text ? { text, ms: 5 } : null;
+        },
+        respond: ({ onFinish }) =>
+          (async function* () {
+            yield 'Hello there. ';
+            yield 'How are you?';
+            onFinish(finish);
+          })(),
+        synthesize: async () => Buffer.from('audio'),
+        reportHeard: (spoken, unspoken) => {
+          heard.push({ spoken, unspoken });
+        },
+        warmUp: () => {},
+        tryTurn: () =>
+          opts.refuse
+            ? { allowed: false, scope: 'ip-turns', message: 'slow down', retryAfterSec: 30 }
+            : { allowed: true },
+      },
+      { id: 'test', maxAudioBytes: 1_000_000 }
+    );
+    const clip = (extra: Record<string, unknown> = {}) => ({
+      audio: Buffer.alloc(40_000, 1),
+      duringPlayback: false,
+      spokenChunks: 0,
+      trimStartMs: 0,
+      spokenMs: 900,
+      clipMs: 1500,
+      ...extra,
+    });
+    const events = () => sent.map((e) => e.event);
+    return { call, sent, heard, clip, events };
+  };
+
+  // An ordinary turn: spoken sentence by sentence, then back to listening.
+  {
+    const t = scripted(['what is rust']);
+    await t.call.audioInput(t.clip());
+    check('a turn answers in two spoken chunks', t.events().filter((e) => e === 'response:audio:chunk').length, 2);
+    check('a turn ends with response:done', t.events().includes('response:done'), true);
+    check('nothing is reported as heard when nothing was cut off', t.heard.length, 0);
+    t.call.playbackComplete({ turnId: 1 });
+    check('finished playback returns the call to listening', t.events().at(-1), 'ready:listening');
+  }
+
+  // A real interruption: only what finished playing is reported as heard.
+  {
+    const t = scripted(['what is rust', 'wait tell me about go instead']);
+    await t.call.audioInput(t.clip());
+    await t.call.audioInput(t.clip({ duringPlayback: true, spokenChunks: 1, spokenMs: 900 }));
+    check('the cut-off turn reports only the first sentence as heard', t.heard, [
+      { spoken: 'Hello there.', unspoken: 'How are you?' },
+    ]);
+    check('the client is told the old turn was interrupted', t.sent.some((e) => e.event === 'turn:interrupted' && e.payload?.spokenText === 'Hello there.'), true);
+    check('the interrupting words get their own answer', t.events().filter((e) => e === 'response:done').length, 2);
+  }
+
+  // A backchannel changes nothing and reports nothing.
+  {
+    const t = scripted(['what is rust', 'mhm']);
+    await t.call.audioInput(t.clip());
+    await t.call.audioInput(t.clip({ duringPlayback: true, spokenChunks: 1, spokenMs: 500 }));
+    check('a backchannel resumes playback', t.events().includes('playback:resume'), true);
+    check('a backchannel reports nothing heard', t.heard.length, 0);
+    check('a backchannel starts no new answer', t.events().filter((e) => e === 'response:done').length, 1);
+  }
+
+  // "Stop" silences the turn and starts nothing.
+  {
+    const t = scripted(['what is rust', 'stop']);
+    await t.call.audioInput(t.clip());
+    await t.call.audioInput(t.clip({ duringPlayback: true, spokenChunks: 1, spokenMs: 400 }));
+    check('stop interrupts the turn', t.events().includes('turn:interrupted'), true);
+    check('stop starts no new answer', t.events().filter((e) => e === 'response:done').length, 1);
+    check('stop leaves the call listening', t.events().at(-1), 'ready:listening');
+  }
+
+  // A refused turn costs nothing: no transcription, a limit notice, back to listening.
+  {
+    const t = scripted(['never transcribed'], { refuse: true });
+    await t.call.audioInput(t.clip());
+    check('a refused turn tells the client why', t.events().includes('limit:reached'), true);
+    check('a refused turn is not transcribed', t.events().includes('transcription:complete'), false);
+  }
+
+  // A silence artefact is dropped and the call carries on listening.
+  {
+    const t = scripted(['Thank you.']);
+    await t.call.audioInput(t.clip({ spokenMs: 100 }));
+    check('a silence artefact gets no answer', t.events().includes('response:done'), false);
+    check('a silence artefact returns to listening', t.events().at(-1), 'ready:listening');
+  }
+
+  // The watchdog recovers a busy state that stopped moving.
+  {
+    let now = 1_000;
+    const t = scripted([]);
+    const call = new Call(
+      {
+        emit: (event, payload) => t.sent.push({ event, payload }),
+        transcribe: async () => null,
+        respond: () => (async function* () {})(),
+        synthesize: async () => Buffer.alloc(0),
+        reportHeard: () => {},
+        warmUp: () => {},
+        tryTurn: () => ({ allowed: true }),
+      },
+      { id: 'w', maxAudioBytes: 1_000_000, now: () => now }
+    );
+    call.bargeDetected({ turnId: 1, chunksPlayed: 0 }); // nothing in flight: ignored
+    call.session.state = 'thinking';
+    call.progress();
+    now += 5_000;
+    call.watchdogTick();
+    check('a short silence does not trip the watchdog', call.session.state, 'thinking');
+    now += 30_000;
+    call.watchdogTick();
+    check('a stuck state returns to listening', call.session.state, 'listening');
+  }
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
