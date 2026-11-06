@@ -35,6 +35,26 @@ export interface ChangeEntry {
 
 export const CHANGELOG: ChangeEntry[] = [
   {
+    date: '2026-11-06',
+    title: 'Interrupting the agent while it spoke sometimes showed an error',
+    kind: 'bug',
+    problem:
+      'In a live call, saying "What?" over a reply logged "Turn failed: Groq text-to-speech failed: The user aborted a request", sent an error to the page, and set the call back to listening in the middle of the new turn.',
+    cause:
+      'Cancelling a turn aborts its speech request. The check that lets an abort through compared against this runtime\'s own DOMException class, and the fetch layer\'s abort is not always that class, so it was reworded as a failure.',
+    fix: 'The check now goes by the error\'s name. A cancelled turn ends quietly.',
+  },
+  {
+    date: '2026-11-06',
+    title: 'A slow brain made the "what the caller heard" report fail',
+    kind: 'bug',
+    problem:
+      'After an interruption the gateway tells the brain what was actually heard. Once the report timed out after 3 seconds and was dropped, so the brain kept the full reply the caller never heard.',
+    cause:
+      'One attempt with a short limit, against a brain that can be slow after idle or on a far database. Retrying blindly was unsafe: a report that empties a reply removes it, so a second run would also remove the previous turn\'s answer.',
+    fix: 'Each report carries an id, stored in the thread when applied; a repeat with the same id does nothing. The gateway now makes up to three attempts of 4 seconds each with that one id. A report that still fails after three is logged and dropped, as before.',
+  },
+  {
     date: '2026-11-05',
     title: 'A dropped connection made the agent forget the whole call',
     kind: 'bug',
