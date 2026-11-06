@@ -7,12 +7,6 @@ from app.thread import Threads
 from tests.test_approval import graph_with, say
 
 
-async def _seed(session: str):
-    from tests.test_approval import toolset  # noqa: F401  (fixture module only for helpers)
-
-    return session
-
-
 async def test_a_heard_report_applies_once_and_leaves_earlier_turns_alone():
     from app.tools import ToolSet
 
