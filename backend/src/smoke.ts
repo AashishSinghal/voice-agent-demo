@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { Conversation } from './services/conversation.js';
 import { Call } from './services/call.js';
 import { classifyUtterance, looksHallucinated } from './services/backchannel.js';
@@ -488,6 +489,14 @@ console.log('\n--- brain event stream ---');
   );
   check('done carries awaitingApproval', (parseBrainEvent({ type: 'done', text: 'q', awaiting_approval: true }) as any).awaitingApproval, true);
   check('unknown event types are ignored', parseBrainEvent({ type: 'future_thing' }), null);
+
+  // The brain's own tests check these same fixtures against its models.
+  const contract = JSON.parse(
+    readFileSync(new URL('../../docs/contract/events.json', import.meta.url), 'utf8')
+  ) as { wire: Record<string, any>; gateway: unknown }[];
+  for (const c of contract) {
+    check(`contract: ${c.wire.type} parses as the fixture says`, parseBrainEvent(c.wire), c.gateway);
+  }
   check(
     'usage is mapped to camelCase',
     parseBrainEvent({ type: 'usage', tier: 'mid', model: 'm', prompt_tokens: 5, completion_tokens: 2, usd: 0.1, degraded_from: 'frontier' }),
