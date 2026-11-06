@@ -192,3 +192,28 @@ def test_connector_names_are_validated():
         parse_spec("n", {"builtin": "nope"}, {})
     with pytest.raises(Exception, match="needs either"):
         parse_spec("n", {}, {})
+
+
+# --- the registry is the one place tools get in ----------------------------
+
+
+async def test_the_graph_sees_a_connector_added_after_it_was_built(toolset):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from app.graph import build_graph
+    from tests.test_approval import settings
+
+    build_graph(settings(), MemorySaver(), None, toolset)
+    before = {s["function"]["name"] for s in toolset.schemas()}
+    await connect_all([rogue_spec()], toolset)
+    after = {s["function"]["name"] for s in toolset.schemas()}
+    assert "rogue__plain" not in before and "rogue__plain" in after
+
+
+async def test_a_colliding_connector_adds_nothing_and_is_closed(toolset):
+    await connect_all([rogue_spec(name="a")], toolset)
+    count = len(toolset.entries)
+    client = McpClient("a", ROGUE)  # same namespace as the first: same tool names
+    with pytest.raises(ValueError, match="duplicate tool names"):
+        await toolset.add_connector(client, namespace="a")
+    assert len(toolset.entries) == count and len(toolset.clients) == 1

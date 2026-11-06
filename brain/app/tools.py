@@ -14,10 +14,56 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from langchain_core.tools import BaseTool, StructuredTool, tool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from .mcp_client import McpClient, McpError
 
 Risk = Literal["safe", "confirm"]
+
+
+class ConfigError(Exception):
+    pass
+
+
+@dataclass
+class Policy:
+    """What the brain lets a third-party server expose, and how risky each tool is.
+
+    A server cannot be trusted to scope itself, so this is enforced here, in the
+    one place tools enter the registry.
+    """
+
+    read_only: bool = False
+    allow: list[str] | None = None
+    deny: list[str] = field(default_factory=list)
+    unannotated: Risk = "confirm"
+    # Tools the user vouches for as safe despite the server's annotations, e.g.
+    # a search that is a POST. An explicit opt-in per tool, never a blanket.
+    safe: list[str] = field(default_factory=list)
+
+    @classmethod
+    def parse(cls, raw: dict[str, Any] | None) -> Policy:
+        raw = raw or {}
+        unannotated = raw.get("unannotated", "confirm")
+        if unannotated not in ("safe", "confirm"):
+            raise ConfigError("policy.unannotated must be 'safe' or 'confirm'")
+        return cls(
+            read_only=bool(raw.get("readOnly", False)),
+            allow=raw.get("allow"),
+            deny=list(raw.get("deny", [])),
+            unannotated=unannotated,
+            safe=list(raw.get("safe", [])),
+        )
+
+    def admits(self, definition: dict[str, Any]) -> bool:
+        name = definition["name"]
+        if name in self.deny:
+            return False
+        if self.allow is not None and name not in self.allow:
+            return False
+        if self.read_only and not (definition.get("annotations") or {}).get("readOnlyHint"):
+            return False
+        return True
 
 
 @dataclass(frozen=True)
@@ -109,11 +155,22 @@ def _mcp_tool(
 
 @dataclass
 class ToolSet:
+    """Every tool the model can call, and the one place that decides which.
+
+    The graph asks this at run time rather than keeping its own list, so a
+    connector added later is visible on the next model call.
+    """
+
     entries: list[ToolEntry] = field(default_factory=local_entries)
     clients: list[McpClient] = field(default_factory=list)
+    _schemas: list[dict] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        names = [e.name for e in self.entries]
+        self._require_unique(self.entries)
+
+    @staticmethod
+    def _require_unique(entries: list[ToolEntry]) -> None:
+        names = [e.name for e in entries]
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
             raise ValueError(f"duplicate tool names across connectors: {sorted(dupes)}")
@@ -124,12 +181,47 @@ class ToolSet:
     def tools(self) -> list[BaseTool]:
         return [e.tool for e in self.entries]
 
-    async def connect(self, client: McpClient) -> None:
-        await client.start()
+    def schemas(self) -> list[dict]:
+        """The tools as the model sees them; rebuilt only when the set changes."""
+        if self._schemas is None:
+            self._schemas = [convert_to_openai_tool(t) for t in self.tools()]
+        return self._schemas
+
+    async def add_connector(
+        self,
+        client: McpClient,
+        policy: Policy | None = None,
+        *,
+        namespace: str | None = None,
+        startup_timeout: float = 30.0,
+    ) -> list[str]:
+        """Start a server and admit its tools. The only way a connector gets in.
+
+        `namespace` prefixes tool names so two servers cannot collide. On any
+        failure the client is closed and nothing is added.
+        """
+        policy = policy or Policy()
+        try:
+            await client.start(timeout=startup_timeout)
+            definitions = [d for d in await client.list_tools() if policy.admits(d)]
+            added = [
+                _mcp_tool(
+                    client,
+                    d,
+                    exposed=f"{namespace}__{d['name']}"[:64] if namespace else None,
+                    unannotated=policy.unannotated,
+                    force_safe=d["name"] in policy.safe,
+                )
+                for d in definitions
+            ]
+            self._require_unique([*self.entries, *added])
+        except Exception:
+            await client.close()
+            raise
+        self.entries.extend(added)
         self.clients.append(client)
-        self.entries.extend(_mcp_tool(client, d) for d in await client.list_tools())
-        # Re-run the duplicate check now that connector tools are in.
-        self.__post_init__()
+        self._schemas = None
+        return [e.name for e in added]
 
     async def close(self) -> None:
         for client in self.clients:
