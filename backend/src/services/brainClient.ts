@@ -10,6 +10,8 @@
  * would keep the full generated reply and later refer to unspoken sentences.
  */
 
+import { randomUUID } from 'node:crypto';
+
 export interface BrainUsage {
   tier: string;
   model: string;
@@ -163,17 +165,31 @@ export function reportHeard(sessionId: string, spoken: string, unspoken: string 
   pendingHeard.set(sessionId, task);
 }
 
+/** Each attempt is bounded; the next turn waits for all of them. */
+const HEARD_ATTEMPTS = 3;
+const HEARD_TIMEOUT_MS = 4000;
+
 async function postHeard(sessionId: string, spoken: string, unspoken: string | null): Promise<void> {
-  try {
-    await fetch(`${brainUrl()}/v1/threads/${encodeURIComponent(sessionId)}/heard`, {
-      method: 'POST',
-      headers: brainHeaders({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ spoken, unspoken }),
-      signal: AbortSignal.timeout(3000),
-    });
-  } catch (error) {
-    // The call must not stall on a bookkeeping failure.
-    console.warn(`Could not report heard text to the brain: ${(error as Error).message}`);
+  // One id for every attempt: the brain applies a report once, so a retry after
+  // a timeout (which may have succeeded) cannot rewrite the history twice.
+  const body = JSON.stringify({ spoken, unspoken, report_id: randomUUID() });
+  for (let attempt = 1; attempt <= HEARD_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(`${brainUrl()}/v1/threads/${encodeURIComponent(sessionId)}/heard`, {
+        method: 'POST',
+        headers: brainHeaders({ 'content-type': 'application/json' }),
+        body,
+        signal: AbortSignal.timeout(HEARD_TIMEOUT_MS),
+      });
+      // A client error will not improve by retrying.
+      if (response.ok || response.status < 500) return;
+      throw new Error(`Brain returned ${response.status}`);
+    } catch (error) {
+      // The call must not stall on a bookkeeping failure.
+      console.warn(
+        `Could not report heard text to the brain (attempt ${attempt}/${HEARD_ATTEMPTS}): ${(error as Error).message}`
+      );
+    }
   }
 }
 
