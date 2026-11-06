@@ -69,7 +69,9 @@ async function synthesizeWithGroq(text: string, signal?: AbortSignal): Promise<B
  * unwrapped it reads like a broken request and sends you looking at the code.
  */
 export function explainGroqTtsFailure(error: unknown, model: string): Error {
-  if (error instanceof DOMException && error.name === 'AbortError') return error;
+  // By name, not instanceof: the fetch layer's abort is not always this realm's
+  // DOMException, and a cancelled turn then showed the caller a failure.
+  if (error instanceof Error && error.name === 'AbortError') return error;
 
   // Where the code lands varies by SDK version: sometimes on the error itself,
   // sometimes inside the parsed body, which may or may not be wrapped again.

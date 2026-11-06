@@ -348,6 +348,8 @@ for (const [label, err, fragment] of [
 // An abort is not a failure to explain; it must pass straight through.
 const aborted = new DOMException('Synthesis aborted', 'AbortError');
 check('abort passes through untouched', explainGroqTtsFailure(aborted, MODEL) === aborted, true);
+const foreignAbort = Object.assign(new Error('The user aborted a request.'), { name: 'AbortError' });
+check('an abort from another realm passes through', explainGroqTtsFailure(foreignAbort, MODEL) === foreignAbort, true);
 
 console.log('\n--- cost model ---');
 

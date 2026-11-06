@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import operator
 import time
 from collections.abc import Mapping
 from typing import Annotated, TypedDict
@@ -69,6 +70,7 @@ class State(TypedDict, total=False):
     session_usd: float
     degraded: bool
     approvals: dict[str, dict]  # tool_call id -> {approved, silent}
+    heard_ids: Annotated[list[str], operator.add]  # /heard reports already applied
     declined: bool
 
 
