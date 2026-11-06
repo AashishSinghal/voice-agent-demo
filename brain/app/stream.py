@@ -21,13 +21,9 @@ from .contract import (
     TurnRequest,
     Usage,
 )
+from .thread import pending_approvals
 
 MAX_PENDING = 10  # a model cannot talk the loop into asking forever
-
-
-async def pending_approvals(graph, config) -> list[dict]:
-    state = await graph.aget_state(config)
-    return [i.value for task in state.tasks for i in task.interrupts]
 
 
 async def run_turn(graph, req: TurnRequest, approval_ttl_s: int = 600) -> AsyncIterator[Event]:
