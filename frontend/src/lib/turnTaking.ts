@@ -168,6 +168,13 @@ export type TurnTakingEvent =
 
 // -- commands ---------------------------------------------------------------
 
+/**
+ * Thresholds are calibrated from the room by the VAD; these multiply the
+ * measured noise floor. One place, so the offline call simulation cannot drift
+ * from what the page passes.
+ */
+export const VAD_FACTORS = { speechFactor: 3, silenceFactor: 1.8 } as const;
+
 export type TurnTakingCommand =
   /** Queue the chunk; `hold` starts it paused. */
   | { type: 'enqueueAudio'; hold: boolean }

@@ -16,19 +16,18 @@ import type { CallState } from '../stores/useBotStateStore';
 import {
   initialState,
   step,
+  VAD_FACTORS,
   vadTuning,
   type SendPayload,
   type TurnTakingCommand,
   type TurnTakingEvent,
 } from './turnTaking.ts';
 import { createVad } from './vad.ts';
+import { executeCommand, type CommandPorts } from './executeCommand.ts';
 
 /** The detector's analysis window (the analyser's `fftSize`) and frame cadence. */
 const WINDOW = 1024;
 const FRAME_MS = 16;
-/** The thresholds' multipliers, as `VoiceAgent.tsx` passes them. */
-const SPEECH_FACTOR = 3;
-const SILENCE_FACTOR = 1.8;
 /** A quiet room: matches the floor measured on a MacBook mic in a real call. */
 const ROOM_RMS = 0.0055;
 
@@ -99,32 +98,40 @@ export function simulateCall(
     for (const command of next.commands) execute(command);
   };
 
-  function execute(command: TurnTakingCommand) {
-    switch (command.type) {
-      case 'stopRecording':
-        // The recorder stops asynchronously, then a fresh one starts.
+  const ports: CommandPorts<true, true> = {
+    heldChunk: () => true,
+    heldClip: () => true,
+    // The server answers a barge with the paused state.
+    playback: {
+      enqueue: () => {},
+      pause: () => {
+        callState = 'paused';
+      },
+      resume: () => {
+        callState = 'speaking';
+      },
+      stop: () => {},
+      resetCounter: () => {},
+    },
+    recorder: {
+      // The recorder stops asynchronously, then a fresh one starts.
+      stop: () => {
         dispatch({ type: 'recordingReady' });
         dispatch({ type: 'recordingStarted', now });
-        break;
-      case 'discardRecording':
+      },
+      discard: () => {
         result.discarded += 1;
         dispatch({ type: 'recordingStarted', now });
-        break;
-      case 'sendClip':
-        result.sent = command.send;
-        break;
-      case 'pausePlayback':
-        // The server answers a barge with the paused state.
-        callState = 'paused';
-        break;
-      case 'resumePlayback':
-        callState = 'speaking';
-        break;
-      case 'trace':
-        result.traces.push(command.detail ? `${command.label}: ${command.detail}` : command.label);
-        break;
-    }
-  }
+      },
+    },
+    server: { sendAudio: (_clip, send) => (result.sent = send), notifyBarge: () => {}, cancelBarge: () => {} },
+    ui: { setUserSpeaking: () => {}, setThinking: () => {}, startTimeline: () => {}, markTimeline: () => {} },
+    log: {
+      trace: (label, detail) => result.traces.push(detail ? `${label}: ${detail}` : label),
+      clipDropped: () => {},
+    },
+  };
+  const execute = (command: TurnTakingCommand) => executeCommand(command, ports);
 
   dispatch({ type: 'callStarted' });
   dispatch({ type: 'recordingStarted', now });
@@ -141,8 +148,7 @@ export function simulateCall(
     const events = vad.push(rms, now, {
       speechDuration: tuning.speechDurationMs,
       silenceDuration: tuning.silenceDurationMs,
-      speechFactor: SPEECH_FACTOR,
-      silenceFactor: SILENCE_FACTOR,
+      ...VAD_FACTORS,
     });
     for (const event of events) {
       if (event === 'start') {
