@@ -27,7 +27,7 @@ MAX_PENDING = 10  # a model cannot talk the loop into asking forever
 
 
 async def run_turn(graph, req: TurnRequest, approval_ttl_s: int = 600) -> AsyncIterator[Event]:
-    config = {"configurable": {"thread_id": req.session_id}}
+    config = {"configurable": {"thread_id": req.session_id, "owner": req.owner}}
     try:
         pending = await pending_approvals(graph, config)
     except Exception as exc:

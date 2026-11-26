@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, Copy, Download, X } from 'lucide-react';
+import type { ComponentProps } from 'react';
+import Connections from './Connections';
 import { SESSION_ID, sessionLink } from '../../hooks/useSocketConnection';
 import { useBotStateStore, median, percentile, type TimelineKind } from '../../stores/useBotStateStore';
 import type { VadCalibration } from '../../hooks/useVoiceActivityDetection';
@@ -26,6 +28,7 @@ interface DebugPanelProps {
   conversationRecording: ConversationRecording | null;
   /** Audio so far, for an export taken while the call is still live. */
   snapshotRecording: () => ConversationRecording | null;
+  connectionsApi: ComponentProps<typeof Connections>['api'];
   isRecordingCall: boolean;
 }
 
@@ -209,6 +212,7 @@ const DebugPanel = ({
   onToggleRecordCall,
   conversationRecording,
   snapshotRecording,
+  connectionsApi,
   isRecordingCall,
 }: DebugPanelProps) => {
   const { state, events, timeline, benchmarks } = useBotStateStore();
@@ -299,6 +303,7 @@ const DebugPanel = ({
           <Row label="socket" value={connected ? 'connected' : 'disconnected'} />
           <Row label="recording" value={isRecording ? 'yes' : 'no'} />
         </section>
+        <Connections api={connectionsApi} active={open && connected} />
         <section>
           <h3 className="mb-1 text-[11px] uppercase tracking-wider text-zinc-600">Conversation</h3>
           <p className="mb-2 break-all font-mono text-[11px] text-zinc-500">{SESSION_ID}</p>

@@ -33,6 +33,14 @@ class Settings:
     db_setup: bool = False  # create checkpoint tables on start; a script does it once in the cloud
     # When set, every /v1 request must carry `Authorization: Bearer <key>`.
     api_key: str | None = None
+    # Per-user accounts (Notion). Off unless token_key is set: a connection's
+    # token is stored encrypted with it, so there is nothing to keep without one.
+    token_key: str | None = None  # a Fernet key (docs/CONNECTIONS.md says how to make one)
+    public_url: str = "http://localhost:8000"  # where the provider redirects back to
+    notion_client_id: str | None = None
+    notion_client_secret: str | None = None
+    notion_auth_base: str = "https://api.notion.com"
+    notion_api_base: str = "https://api.notion.com"
 
     @classmethod
     def from_env(cls, load_env: bool = True) -> Settings:
@@ -71,4 +79,10 @@ class Settings:
             db_pool_size=_int("BRAIN_DB_POOL_SIZE", 3),
             db_setup=os.environ.get("BRAIN_DB_SETUP", "").lower() in ("1", "true", "yes"),
             api_key=os.environ.get("BRAIN_API_KEY") or None,
+            token_key=os.environ.get("BRAIN_TOKEN_KEY") or None,
+            public_url=(os.environ.get("BRAIN_PUBLIC_URL") or "http://localhost:8000").rstrip("/"),
+            notion_client_id=os.environ.get("NOTION_CLIENT_ID") or None,
+            notion_client_secret=os.environ.get("NOTION_CLIENT_SECRET") or None,
+            notion_auth_base=os.environ.get("NOTION_AUTH_BASE", "https://api.notion.com").rstrip("/"),
+            notion_api_base=os.environ.get("NOTION_API_BASE", "https://api.notion.com").rstrip("/"),
         )

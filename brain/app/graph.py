@@ -31,6 +31,7 @@ from typing import Annotated, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -74,6 +75,10 @@ class State(TypedDict, total=False):
     declined: bool
 
 
+def _owner(config: RunnableConfig) -> str | None:
+    return (config.get("configurable") or {}).get("owner")
+
+
 def build_graph(
     settings: Settings,
     checkpointer: BaseCheckpointSaver | None = None,
@@ -83,22 +88,23 @@ def build_graph(
     guard = CostGuard(tiers=settings.tiers, cap_usd=settings.turn_budget_usd, max_steps=settings.max_steps)
     toolset = toolset or ToolSet()
 
-    async def call_model(state: State) -> dict:
+    async def call_model(state: State, config: RunnableConfig) -> dict:
         write = get_stream_writer()
+        view = await toolset.for_owner(_owner(config))
         steps = state.get("steps", 0)
         turn_usd = state.get("turn_usd", 0.0)
 
         ctx = assemble(
             system=SYSTEM_PROMPT,
             history=state["messages"],
-            tools=toolset.schemas(),
+            tools=view.schemas(),
             window=settings.context_window,
             reserve_output=settings.reserve_output,
         )
         write({"type": "context", "report": ctx.report.to_dict()})
 
         kept = {s["function"]["name"] for s in ctx.tools}
-        bound_tools = [t for t in toolset.tools() if t.name in kept]
+        bound_tools = [t for t in view.tools() if t.name in kept]
         preferred = settings.tiers[0].name if settings.tiers else None
 
         # Walk the chain. A tier that is over budget is skipped by the guard; a
@@ -168,12 +174,13 @@ def build_graph(
             "degraded": bool(degraded_from) or state.get("degraded", False),
         }
 
-    def gate(state: State) -> dict:
+    async def gate(state: State, config: RunnableConfig) -> dict:
         """Ask about every risky call in the last message. No side effects."""
+        view = await toolset.for_owner(_owner(config))
         last = state["messages"][-1]
         decisions: dict[str, dict] = {}
         for call in last.tool_calls:
-            entry = toolset.get(call["name"])
+            entry = view.get(call["name"])
             if entry is None or entry.risk != "confirm":
                 continue
             action = entry.describe_action(call["args"])
@@ -195,15 +202,16 @@ def build_graph(
             }
         return {"approvals": decisions}
 
-    async def execute(state: State) -> dict:
+    async def execute(state: State, config: RunnableConfig) -> dict:
         write = get_stream_writer()
+        view = await toolset.for_owner(_owner(config))
         last = state["messages"][-1]
         approvals = state.get("approvals", {})
         out: list[ToolMessage] = []
         declined, silent = False, False
 
         for call in last.tool_calls:
-            entry = toolset.get(call["name"])
+            entry = view.get(call["name"])
             if entry is None:
                 out.append(
                     ToolMessage(

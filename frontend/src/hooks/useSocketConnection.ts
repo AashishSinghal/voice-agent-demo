@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import type { Socket } from 'socket.io-client';
 import { io } from 'socket.io-client';
 import { useBotStateStore, type CallState } from '../stores/useBotStateStore';
+import { getOwnerKey } from '../lib/ownerKey';
 import { diag } from '../lib/diagnostics';
 
 export interface ConversationMessage {
@@ -75,6 +76,11 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  */
 const requested = new URLSearchParams(window.location.search).get('session');
 export const SESSION_ID = requested && UUID.test(requested) ? requested.toLowerCase() : crypto.randomUUID();
+
+export interface ConnectionsView {
+  available: string[];
+  connected: { service: string; workspace?: string }[];
+}
 
 /** A link that reopens this conversation. */
 export const sessionLink = () => `${window.location.origin}${window.location.pathname}?session=${SESSION_ID}`;
@@ -160,7 +166,7 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
       reconnectionAttempts: 5,
       // Only sent when the backend sets ACCESS_TOKEN. Baked into the public
       // bundle, so it deters casual use rather than keeping a secret.
-      auth: { token: import.meta.env.VITE_ACCESS_TOKEN ?? '', sessionId: SESSION_ID },
+      auth: { token: import.meta.env.VITE_ACCESS_TOKEN ?? '', sessionId: SESSION_ID, ownerKey: getOwnerKey() },
     });
     socketRef.current = socket;
 
@@ -381,7 +387,31 @@ export const useSocketConnection = (serverUrl: string, handlers: Handlers) => {
     socketRef.current?.emit('playback:complete', { turnId });
   }, []);
 
+  /** Ask the server about connected accounts; it answers over the socket. */
+  const ask = useCallback(
+    (event: string, payload?: unknown) =>
+      new Promise<Record<string, unknown>>((resolve, reject) => {
+        const socket = socketRef.current;
+        if (!socket?.connected) return reject(new Error('Not connected'));
+        socket.timeout(10_000).emit(event, payload, (err: Error | null, reply: Record<string, unknown>) => {
+          if (err) return reject(err);
+          if (!reply?.ok) return reject(new Error(String(reply?.error ?? 'Failed')));
+          resolve(reply);
+        });
+      }),
+    []
+  );
+  const connectionsApi = useMemo(
+    () => ({
+      list: () => ask('connections:list') as unknown as Promise<ConnectionsView>,
+      start: (service: string) => ask('connections:start', { service }) as unknown as Promise<{ url: string }>,
+      remove: (service: string) => ask('connections:remove', { service }),
+    }),
+    [ask]
+  );
+
   return {
+    connectionsApi,
     connected,
     messages,
     metrics,
