@@ -59,9 +59,14 @@ const app = express();
 const httpServer = createServer(app);
 const PORT = process.env.PORT || 3000;
 
-app.use(
-  cors({ origin: process.env.CLIENT_URL || 'http://localhost:5173', credentials: true })
-);
+// CLIENT_URL may list several origins, comma-separated (the vercel.app URL and
+// the custom domain). A trailing slash would never match a browser Origin.
+const CLIENT_ORIGINS = (process.env.CLIENT_URL || 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
+app.use(cors({ origin: CLIENT_ORIGINS, credentials: true }));
 app.use(express.json());
 
 app.get('/health', (_, res) => {
@@ -79,7 +84,7 @@ app.get('/health', (_, res) => {
 
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    origin: CLIENT_ORIGINS,
     methods: ['GET', 'POST'],
     credentials: true,
   },
